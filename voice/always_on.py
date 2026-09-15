@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 import wave
+from collections import deque
 from pathlib import Path
 
 from pynput import keyboard
@@ -253,6 +254,16 @@ def _write_wav(path: str, pcm_bytes: bytes):
         wf.writeframes(pcm_bytes)
 
 
+# How many pre-speech chunks to always keep buffered, so the moment voice
+# crosses the threshold we can prepend what came just before it. Real words
+# often start quiet and ramp up — "stand down" got captured as just "down"
+# once, most likely because the soft onset of "stand" sat under SILENCE_RMS
+# until it was already partway through the word. 8 chunks = 160ms, enough
+# for a typical soft onset without meaningfully risking picking up noise
+# from well before you actually started talking.
+_PREROLL_CHUNKS = 8
+
+
 def _record_utterance(proc, max_wait_s: float):
     """Wait up to max_wait_s for you to actually start talking; once you do,
     record until SILENCE_HANG_MS of continuous VAD-silence (or the
@@ -260,6 +271,7 @@ def _record_utterance(proc, max_wait_s: float):
     Returns the raw PCM bytes, or None if nobody spoke within max_wait_s —
     that's the signal that the conversation is over, not a failed turn."""
     buffer = bytearray()
+    preroll = deque(maxlen=_PREROLL_CHUNKS)
     silence_ms = 0
     heard_voice = False
     start = time.time()
@@ -273,9 +285,13 @@ def _record_utterance(proc, max_wait_s: float):
         if not heard_voice:
             if speech:
                 heard_voice = True
+                for pre_chunk in preroll:
+                    buffer.extend(pre_chunk)
                 buffer.extend(chunk)
-            elif (time.time() - start) > max_wait_s:
-                return None  # gave up waiting — nobody spoke, not an error
+            else:
+                preroll.append(chunk)
+                if (time.time() - start) > max_wait_s:
+                    return None  # gave up waiting — nobody spoke, not an error
             continue
 
         buffer.extend(chunk)
