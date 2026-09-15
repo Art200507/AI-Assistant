@@ -612,4 +612,41 @@ calling it done:
    status reports" from a smart model actually needed for the queries that
    *do* stay on the fast lookup path.
 
+**Update, round ten — local file access. "This was the main piece of the
+whole system... we just cut it off."** Fair callout. Everything until now
+let cloud-Claude read/write files, but only on the server — it genuinely
+cannot reach this Mac's filesystem, full stop, no workaround changes that.
+What was actually missing was a *local* component: something on this Mac
+that reads a local file, hands it to cloud-Claude, and applies the result
+back here.
+
+Built `voice/file_bridge.py`. Design choice worth explaining: voice-
+dictating an exact file path is unreliable (Whisper mangling
+`/Users/atharva/Projects/...`), so this uses a drop-folder instead —
+`inbox/` at the project root. Put a file there, say "check the inbox" or
+"fix that file" (detected locally in `always_on.py` via `_FILE_FIX_RE`,
+*before* anything goes to the server — has to be local, since only this
+Mac can read that folder). Flow: backs up the original first
+(`backups/`, timestamped, never overwritten — this can never lose your
+original even if a "fix" is wrong) → uploads to
+`~/jarvis-workspace/incoming/` on the server → asks Claude (which already
+has real Bash/Read/Write there) to find and fix actual bugs, not invent
+style changes → downloads the result to a temp file → only replaces the
+original on a clean download → logs the whole thing to `activity.log`
+(file, backup path, timestamp, what Claude said it changed).
+
+Tested end-to-end twice with real bugs I planted on purpose (zero-division
+guards missing, an off-by-logic bug that zeroed instead of updated a
+running max) — both found and correctly fixed, originals safely backed up,
+activity logged both times. Not a demo — ran the actual pipeline, checked
+the actual resulting file on disk, read back the actual backup content to
+confirm the original wasn't lost.
+
+**Known limits, not yet addressed**: only one file at a time (whatever's
+newest in the inbox), no way to point at a whole folder/project, 512KB
+cap (refuses rather than silently uploading something huge). If you want
+this to scale to "fix this whole project," that's a bigger scope — say so
+and we'll design that properly rather than stretching this in an ad hoc
+way.
+
 — built overnight by Claude, 2026-09-15
