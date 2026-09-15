@@ -551,4 +551,25 @@ was working as designed:
   worth building) that it deserves its own focused pass rather than being
   squeezed in alongside everything else tonight.
 
+**Update, round eight — Groq replaces Gemini as the fast tier, now
+actually working.** You provided a Groq key. Tested it directly before
+wiring anything in (same discipline as Gemini): `llama-3.3-70b-versatile`
+doesn't exist on this account, `openai/gpt-oss-20b` does. First real
+response came back empty — it's a reasoning model, and a small
+`max_tokens` let it burn the whole budget on internal chain-of-thought
+before ever writing the actual answer (`finish_reason: "length"`). Fixed
+with `max_tokens: 300` + `reasoning_effort: "low"`; confirmed real content
+at ~0.09-0.27s completion time. Wired in as the active fast tier
+(`ask_groq`, `openai/gpt-oss-20b`), Gemini's code left in place but dormant
+for whenever that billing gets sorted — swapping back is a one-line change
+in `answer_simple`. Verified through the full pipeline, not just the raw
+API: "how are you doing" / "what does renaissance mean" / "what's the
+capital of France" all answered correctly in 1.3-1.7s, down from ~12s
+falling back to Claude before this. Also caught and fixed a small
+formatting issue while checking the output: Groq's model uses markdown
+emphasis (`*word*`, `**word**`) despite being told not to — added
+stripping for it in `jarvis_client._clean()` alongside the existing
+sources/links/backticks cleanup, so TTS doesn't get asterisks read as
+literal characters (or just silently garbled).
+
 — built overnight by Claude, 2026-09-15
