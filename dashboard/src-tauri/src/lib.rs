@@ -189,6 +189,44 @@ fn unix_now() -> String {
     dur.as_secs().to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VoiceState {
+    #[serde(default = "default_voice_state_label")]
+    state: String,
+    #[serde(default)]
+    amplitude: f32,
+    #[serde(default)]
+    updated_at: f64,
+}
+
+fn default_voice_state_label() -> String {
+    "idle".into()
+}
+
+impl Default for VoiceState {
+    fn default() -> Self {
+        VoiceState {
+            state: default_voice_state_label(),
+            amplitude: 0.0,
+            updated_at: 0.0,
+        }
+    }
+}
+
+fn voice_state_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(format!("{home}/.jarvis-dashboard/voice_state.json"))
+}
+
+#[tauri::command]
+fn fetch_voice_state() -> VoiceState {
+    let path = voice_state_path();
+    match fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => VoiceState::default(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -196,6 +234,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fetch_tasks,
             fetch_service_status,
+            fetch_voice_state,
             get_config
         ])
         .run(tauri::generate_context!())

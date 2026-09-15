@@ -1,7 +1,24 @@
+import { createAvatar } from "./avatar.js";
+
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWindow } = window.__TAURI__.window;
 
 const REFRESH_MS = 5000;
+const VOICE_POLL_MS = 150;
+
+const STATE_LABELS = {
+  idle: "IDLE",
+  listening: "LISTENING",
+  thinking: "THINKING",
+  speaking: "SPEAKING",
+};
+
+const STATE_SUB = {
+  idle: "voice link idle — say the word",
+  listening: "capturing audio…",
+  thinking: "routing to the brain…",
+  speaking: "responding",
+};
 
 const el = (id) => document.getElementById(id);
 
@@ -172,9 +189,30 @@ async function toggleKiosk() {
   el("kiosk-btn").textContent = kiosk ? "EXIT KIOSK" : "KIOSK";
 }
 
+let avatar = null;
+let lastVoiceState = null;
+
+async function pollVoiceState() {
+  try {
+    const vs = await invoke("fetch_voice_state");
+    const state = vs.state || "idle";
+    const amp = vs.amplitude || 0;
+    if (avatar) avatar.setState(state, amp);
+    if (state !== lastVoiceState) {
+      lastVoiceState = state;
+      el("avatar-state").textContent = STATE_LABELS[state] || state.toUpperCase();
+      el("avatar-sub").textContent = STATE_SUB[state] || "";
+    }
+  } catch {
+    /* voice pipeline may not be running yet — avatar just stays idle */
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   updateClock();
   setInterval(updateClock, 1000);
+
+  avatar = createAvatar(el("avatar-canvas"));
 
   el("refresh-btn").addEventListener("click", refresh);
   el("kiosk-btn").addEventListener("click", toggleKiosk);
@@ -188,4 +226,5 @@ window.addEventListener("DOMContentLoaded", () => {
 
   refresh();
   setInterval(refresh, REFRESH_MS);
+  setInterval(pollVoiceState, VOICE_POLL_MS);
 });
