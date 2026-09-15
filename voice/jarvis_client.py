@@ -19,6 +19,14 @@ SSH_USER = os.environ.get("JARVIS_SSH_USER", "ubuntu")
 SSH_KEY = os.environ.get("JARVIS_SSH_KEY", os.path.expanduser("~/.ssh/jarvis-oracle.key"))
 REMOTE_JARVIS_DIR = os.environ.get("JARVIS_REMOTE_DIR", "/home/ubuntu/JARVIS")
 
+# Non-interactive SSH commands don't source ~/.profile or ~/.bashrc, so the
+# server's default PATH is missing /home/ubuntu/.local/bin — which is where
+# `claude` actually lives there. Without this, any query that needs to
+# escalate to claude -p (jarvis_respond.escalate_to_claude) fails with
+# "claude: command not found", while plain lookup queries (which only need
+# `ollama`, already on the default PATH) work fine — a confusing split.
+REMOTE_EXTRA_PATH = os.environ.get("JARVIS_REMOTE_EXTRA_PATH", "/home/ubuntu/.local/bin")
+
 # Runs jarvis_respond.respond() on the server, reading the query from stdin
 # so we never have to shell-quote arbitrary transcribed text.
 _REMOTE_PY = (
@@ -26,6 +34,8 @@ _REMOTE_PY = (
     "import jarvis_respond as jr; "
     "print(jr.respond(sys.stdin.read().strip()))"
 ) % REMOTE_JARVIS_DIR
+
+_REMOTE_CMD = f'export PATH="{REMOTE_EXTRA_PATH}:$PATH"; python3 -c "{_REMOTE_PY}"'
 
 
 def ask_jarvis(query_text: str, timeout: int = 90) -> str:
@@ -42,7 +52,7 @@ def ask_jarvis(query_text: str, timeout: int = 90) -> str:
                 "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new",
                 f"{SSH_USER}@{SSH_HOST}",
-                f"python3 -c \"{_REMOTE_PY}\"",
+                _REMOTE_CMD,
             ],
             input=query_text,
             capture_output=True,
