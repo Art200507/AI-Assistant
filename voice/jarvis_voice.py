@@ -31,20 +31,48 @@ PIPER_MODEL = os.environ.get(
     "PIPER_MODEL", str(HERE / "models" / "piper" / "en_GB-alan-medium.onnx")
 )
 
-# TTS engine: "macos" (default) uses the system `say` command with the
-# Enhanced-quality Daniel voice, already installed on this Mac — noticeably
-# more natural than Piper's medium-quality model, zero extra setup. Set
-# JARVIS_TTS_ENGINE=piper to go back to Piper (e.g. for comparison, or on a
-# machine where the enhanced voice isn't installed — check with
-# `say -v '?'`, and if missing, System Settings -> Accessibility -> Spoken
-# Content -> System Voice lets you download it).
+# TTS engine: "macos" (default) uses the system `say` command with Daniel
+# (en_GB, male) — the only Daniel actually registered on this Mac; verified
+# via `say -v '?'`. Note: `say -v` on an unrecognized name does NOT error,
+# it silently falls back to the system default voice — which is how a
+# fabricated "Daniel (Enhanced)" ended up playing a female US voice earlier.
+# Always check a voice name is real with `say -v '?' | grep -i <name>`
+# before using it. If you download the genuine enhanced/premium Daniel via
+# System Settings -> Accessibility -> Spoken Content -> System Voice -> (i)
+# -> find Daniel -> Download, it will show up as its own exact line in
+# `say -v '?'` — copy that exact string into JARVIS_SAY_VOICE once it does.
+# Set JARVIS_TTS_ENGINE=piper to use Piper instead.
 TTS_ENGINE = os.environ.get("JARVIS_TTS_ENGINE", "macos")
-SAY_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel (Enhanced)")
+SAY_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")
 SAY_SAMPLE_RATE = 22050
 
 AUDIO_DEVICE = resolve_audio_device()  # auto-picks the real mic by name; JARVIS_AUDIO_DEVICE overrides
 
 CHUNK_MS = 60
+
+
+def _validate_say_voice():
+    """`say -v <name>` on an unrecognized name does NOT error — it silently
+    plays the system default voice instead. That's exactly how a fabricated
+    "Daniel (Enhanced)" turned into an unexpected female US voice. Check the
+    configured name is real at startup so a typo/wrong guess is loud, not
+    silent, next time."""
+    if TTS_ENGINE != "macos":
+        return
+    try:
+        result = subprocess.run(["say", "-v", "?"], capture_output=True, text=True, timeout=10)
+        names = {line.split("  ")[0].strip() for line in result.stdout.splitlines() if line.strip()}
+        if SAY_VOICE not in names:
+            print(
+                f"⚠️  JARVIS_SAY_VOICE={SAY_VOICE!r} isn't a real installed voice — "
+                f"`say` will silently use the system default instead (probably not "
+                f"who you think). Run `say -v '?'` to see actual installed voices."
+            )
+    except Exception:
+        pass  # non-fatal — this is a best-effort sanity check, not required to run
+
+
+_validate_say_voice()  # runs on import so both this script and always_on.py get the check
 
 
 def record_until_enter(out_wav: str):
