@@ -194,23 +194,31 @@ def _synthesize_to_temp(text: str) -> str:
     return path
 
 
-def _play_wav_with_avatar_sync(wav_path: str):
+def _play_wav_with_avatar_sync(wav_path: str, interrupt_event=None):
     envelope = _amplitude_envelope(wav_path)
     player = subprocess.Popen(["afplay", wav_path])
     for amp in envelope:
         if player.poll() is not None:
+            break
+        if interrupt_event is not None and interrupt_event.is_set():
+            player.terminate()
             break
         write_state("speaking", amp)
         time.sleep(CHUNK_MS / 1000)
     player.wait(timeout=30)
 
 
-def speak(text: str):
+def speak(text: str, interrupt_event=None):
     """Synthesizes and plays sentence-by-sentence, pipelined: the next
     sentence is synthesized in the background while the current one plays,
     instead of waiting for the entire answer to be voiced before any sound
     plays. For a long answer this is the difference between silence for the
-    whole response and starting to talk almost immediately."""
+    whole response and starting to talk almost immediately.
+
+    interrupt_event: an optional threading.Event — if the caller sets it
+    (e.g. because it detected you started talking over Jarvis), playback of
+    the current sentence stops immediately and no further sentences start.
+    Used for barge-in support in always_on.py."""
     if not text:
         write_state("idle", 0.0)
         return
@@ -220,6 +228,8 @@ def speak(text: str):
     try:
         future = executor.submit(_synthesize_to_temp, sentences[0])
         for i in range(len(sentences)):
+            if interrupt_event is not None and interrupt_event.is_set():
+                break
             wav_path = future.result()
             next_future = (
                 executor.submit(_synthesize_to_temp, sentences[i + 1])
@@ -227,9 +237,11 @@ def speak(text: str):
                 else None
             )
             try:
-                _play_wav_with_avatar_sync(wav_path)
+                _play_wav_with_avatar_sync(wav_path, interrupt_event=interrupt_event)
             finally:
                 Path(wav_path).unlink(missing_ok=True)
+            if interrupt_event is not None and interrupt_event.is_set():
+                break
             future = next_future
     finally:
         write_state("idle", 0.0)

@@ -103,6 +103,23 @@ SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
 SILENCE_HANG_MS = float(os.environ.get("JARVIS_SILENCE_HANG_MS", "1400"))
 MAX_UTTERANCE_S = 20
 
+# Barge-in: if you start talking while Jarvis is mid-sentence, stop
+# immediately instead of finishing the thought. Threshold has to sit above
+# whatever Jarvis's own voice measures as, leaking from the speakers back
+# into the mic during playback — measured that directly rather than
+# guessing: on this Mac, at normal system volume, speaker echo hits up to
+# ~1365 RMS (p50 372, p90 828, p99 1227 across a real sentence). First
+# attempt at 1200 sat right in that range and Jarvis interrupted itself
+# constantly. 2000 gives real headroom above the measured echo ceiling.
+# If you change system volume a lot, this may need retuning — no
+# --calibrate mode for this one yet, but the same idea as the clap one
+# would work if it needs it.
+BARGE_IN_RMS = float(os.environ.get("JARVIS_BARGE_IN_RMS", "2000"))
+BARGE_IN_SUSTAIN_CHUNKS = 4  # ~80ms of continuous loud audio
+# After an interrupt, how long to wait for you to keep talking before
+# giving up (some slack in case it was a false trigger from echo, not you).
+BARGE_IN_RECOVERY_WAIT_S = 2.0
+
 
 def _is_speech(chunk: bytes) -> bool:
     return _rms(chunk) > SILENCE_RMS
@@ -273,6 +290,42 @@ def _record_utterance(proc, max_wait_s: float):
     return bytes(buffer)
 
 
+def _barge_in_monitor(proc, stop_flag: threading.Event, interrupt_event: threading.Event):
+    """Runs in a background thread for as long as speak() is playing audio.
+    Reads the SAME mic stream speak() itself isn't touching right now (it's
+    blocked synthesizing/playing), watching for sustained loud audio that
+    means you're talking over it."""
+    consecutive = 0
+    while not stop_flag.is_set():
+        chunk = _read_exact(proc.stdout, CHUNK_BYTES)
+        if not chunk:
+            return
+        if _rms(chunk) > BARGE_IN_RMS:
+            consecutive += 1
+            if consecutive >= BARGE_IN_SUSTAIN_CHUNKS:
+                interrupt_event.set()
+                return
+        else:
+            consecutive = 0
+
+
+def _speak_interruptible(proc, text: str) -> bool:
+    """speak(), but stops immediately if you start talking over it. Returns
+    True if it actually got interrupted (vs finishing normally)."""
+    interrupt_event = threading.Event()
+    stop_flag = threading.Event()
+    monitor = threading.Thread(
+        target=_barge_in_monitor, args=(proc, stop_flag, interrupt_event), daemon=True
+    )
+    monitor.start()
+    try:
+        speak(text, interrupt_event=interrupt_event)
+    finally:
+        stop_flag.set()
+        monitor.join(timeout=1)
+    return interrupt_event.is_set()
+
+
 def _handle_wake(proc, trigger: str = "clap"):
     label = "\U0001f44f Clap" if trigger == "clap" else "⌨️  Spacebar held"
     print(f"\n{label} — waking up…")
@@ -281,15 +334,25 @@ def _handle_wake(proc, trigger: str = "clap"):
     # start actually recording the real question. Only said once per
     # conversation, not on every follow-up turn.
     write_state("speaking", 0.6)
-    speak(_pick_wake_ack())
-    _drain_backlog(proc)  # discard mic input captured while the ack played
+    interrupted = _speak_interruptible(proc, _pick_wake_ack())
+    if not interrupted:
+        _drain_backlog(proc)  # discard mic input captured while the ack played
 
     first_turn = True
     while True:
-        print("Listening…" if first_turn else "Listening for a follow-up…")
-        write_state("listening", 0.5)
-        wait_s = MAX_UTTERANCE_S if first_turn else FOLLOWUP_WAIT_S
-        pcm = _record_utterance(proc, wait_s)
+        if interrupted:
+            # You talked over Jarvis — it already stopped, now catch the
+            # rest of what you're saying rather than making you re-trigger.
+            # The first ~80ms was consumed by the barge-in detector itself
+            # (not saved), so this picks up an instant after that.
+            print("(interrupted — listening)")
+            write_state("listening", 0.5)
+            pcm = _record_utterance(proc, BARGE_IN_RECOVERY_WAIT_S)
+        else:
+            print("Listening…" if first_turn else "Listening for a follow-up…")
+            write_state("listening", 0.5)
+            wait_s = MAX_UTTERANCE_S if first_turn else FOLLOWUP_WAIT_S
+            pcm = _record_utterance(proc, wait_s)
         first_turn = False
 
         if pcm is None:
@@ -303,15 +366,17 @@ def _handle_wake(proc, trigger: str = "clap"):
 
         if not text:
             print("(heard something, couldn't make out words)")
-            speak("Sorry, I didn't quite catch that, sir.")
-            _drain_backlog(proc)
+            interrupted = _speak_interruptible(proc, "Sorry, I didn't quite catch that, sir.")
+            if not interrupted:
+                _drain_backlog(proc)
             continue  # stay in the conversation, give it another go
 
         print(f"You said: {text}")
         answer = ask_jarvis(text)
         print(f"Jarvis: {answer}")
-        speak(answer)
-        _drain_backlog(proc)
+        interrupted = _speak_interruptible(proc, answer)
+        if not interrupted:
+            _drain_backlog(proc)
         # loop straight back into listening — no re-trigger needed for a
         # follow-up, this is what makes it feel like an actual conversation
 
