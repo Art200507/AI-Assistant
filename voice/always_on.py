@@ -6,10 +6,11 @@ transient well above the recent ambient noise floor). In parallel, a global
 keyboard listener watches for the spacebar being held down for at least
 LONG_PRESS_SECONDS. Either one wakes Jarvis the same way: it speaks a short
 acknowledgment (a rotating pool of dry, polite, JARVIS-flavored lines —
-see _WAKE_ACK_POOL), then listens and buffers real audio until you stop
-talking (silence-based endpointing), then runs it through the same
-transcribe -> ask_jarvis -> speak pipeline as the push-to-talk script
-(jarvis_voice.py).
+see _WAKE_ACK_POOL), then listens and buffers real audio until ~1.4s of
+silence (a volume threshold — webrtcvad was tried and measured to perform
+badly on this mic, see the note above SILENCE_RMS), then runs it through
+the same transcribe -> ask_jarvis -> speak pipeline as the push-to-talk
+script (jarvis_voice.py).
 
 Clap detection is amplitude/transient-based, not a trained classifier — it
 can be fooled by other sharp sounds (a dropped object, a door) and may need
@@ -82,12 +83,29 @@ def _pick_wake_ack() -> str:
         return random.choice(_WAKE_ACK_RARE)
     return random.choice(_WAKE_ACK_PLAIN)
 
-# Endpointing for the actual query after a wake trigger. Trimmed from 1000ms
-# to 800ms for snappier turn-taking — raise JARVIS_SILENCE_HANG_MS back up
-# if it's cutting you off mid-thought.
+# Endpointing for the actual query after a wake trigger.
+#
+# Tried webrtcvad here (real VoIP-grade voice-activity detection) instead of
+# a raw volume threshold, on the theory it would tell a quiet trailing "s"
+# apart from true silence better than a threshold can. Measured it directly
+# against this Mac's built-in mic before trusting it: it classified 90-97%
+# of quiet ambient room audio as "speech" at every sensitivity mode (0-3).
+# That's not a tuning problem, it's unusable — it would mean almost every
+# turn hits the MAX_UTTERANCE_S hard cap instead of ending naturally. Likely
+# cause: webrtcvad's model was trained on telephone-quality 8kHz audio and
+# doesn't generalize well to this mic's noise floor. Reverted to the RMS
+# threshold, which is measured to actually work on this hardware.
 SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
-SILENCE_HANG_MS = float(os.environ.get("JARVIS_SILENCE_HANG_MS", "800"))
-MAX_UTTERANCE_S = 12
+# How long a stretch of silence after you've started talking before we
+# decide you're done. Was 800ms (tuned for snappiness) — too aggressive,
+# was cutting off mid-thought pauses. 1400ms gives real room to pause and
+# collect your thoughts without ending the turn.
+SILENCE_HANG_MS = float(os.environ.get("JARVIS_SILENCE_HANG_MS", "1400"))
+MAX_UTTERANCE_S = 20
+
+
+def _is_speech(chunk: bytes) -> bool:
+    return _rms(chunk) > SILENCE_RMS
 
 # After Jarvis finishes speaking, how long it keeps listening for a
 # follow-up before quietly giving up and going back to standby (clap /
@@ -219,7 +237,8 @@ def _write_wav(path: str, pcm_bytes: bytes):
 
 def _record_utterance(proc, max_wait_s: float):
     """Wait up to max_wait_s for you to actually start talking; once you do,
-    record until ~1s of trailing silence (or the MAX_UTTERANCE_S hard cap).
+    record until SILENCE_HANG_MS of continuous VAD-silence (or the
+    MAX_UTTERANCE_S hard cap — a safety net, not the normal stop condition).
     Returns the raw PCM bytes, or None if nobody spoke within max_wait_s —
     that's the signal that the conversation is over, not a failed turn."""
     buffer = bytearray()
@@ -231,10 +250,10 @@ def _record_utterance(proc, max_wait_s: float):
         chunk = _read_exact(proc.stdout, CHUNK_BYTES)
         if not chunk:
             break
-        level = _rms(chunk)
+        speech = _is_speech(chunk)
 
         if not heard_voice:
-            if level > SILENCE_RMS:
+            if speech:
                 heard_voice = True
                 buffer.extend(chunk)
             elif (time.time() - start) > max_wait_s:
@@ -242,7 +261,7 @@ def _record_utterance(proc, max_wait_s: float):
             continue
 
         buffer.extend(chunk)
-        if level > SILENCE_RMS:
+        if speech:
             silence_ms = 0
         else:
             silence_ms += CHUNK_MS
