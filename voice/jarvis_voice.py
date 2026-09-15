@@ -132,7 +132,7 @@ def run_once():
         text = transcribe(wav_path)
         if not text:
             print("(heard nothing)")
-            speak("I didn't catch that.")
+            speak("I'm afraid I didn't quite catch that, sir.")
             return
         print(f"You said: {text}")
         print("Asking Jarvis…")

@@ -5,8 +5,9 @@ While idle, every ~20ms chunk is checked for a clap (a sharp amplitude
 transient well above the recent ambient noise floor). In parallel, a global
 keyboard listener watches for the spacebar being held down for at least
 LONG_PRESS_SECONDS. Either one wakes Jarvis the same way: it speaks a short
-acknowledgment ("What's up?"), then listens and buffers real audio until you
-stop talking (silence-based endpointing), then runs it through the same
+acknowledgment (a rotating pool of dry, polite, JARVIS-flavored lines —
+see _WAKE_ACK_POOL), then listens and buffers real audio until you stop
+talking (silence-based endpointing), then runs it through the same
 transcribe -> ask_jarvis -> speak pipeline as the push-to-talk script
 (jarvis_voice.py).
 
@@ -18,6 +19,7 @@ first time (System Settings -> Privacy & Security -> Accessibility -> allow
 your terminal app) since it's a global hotkey, not tied to any window.
 """
 import os
+import random
 import signal
 import struct
 import subprocess
@@ -49,8 +51,31 @@ CLAP_COOLDOWN_S = 1.0
 LONG_PRESS_SECONDS = float(os.environ.get("JARVIS_LONG_PRESS_SECONDS", "0.6"))
 
 # What Jarvis says the instant it wakes, before it starts actually listening
-# for your real question — gives you an audible cue that it's your turn to talk.
-WAKE_ACK_PHRASE = os.environ.get("JARVIS_WAKE_ACK", "Yes? What's up?")
+# for your real question — gives you an audible cue that it's your turn to
+# talk. Rotates through a small pool so it doesn't feel like a canned
+# robotic line; mostly plain and dry, with the odd tiny joke or compliment
+# mixed in rarely (about 1 in 10), matching the persona in the actual
+# answers (see jarvis_respond.py on the server). Set JARVIS_WAKE_ACK to pin
+# a single fixed phrase instead.
+_WAKE_ACK_POOL = [
+    "At your service, sir.",
+    "Yes, sir? I'm listening.",
+    "Go ahead, sir.",
+    "Standing by, sir.",
+    "How may I be of assistance?",
+    "Do go on, sir.",
+    "I'm listening, sir.",
+    "Yes, sir?",
+    "Ah, back so soon. Go on, sir.",  # tiny dry joke, rare
+    "Always a pleasure, sir. What can I do for you?",  # compliment, rare
+]
+
+
+def _pick_wake_ack() -> str:
+    fixed = os.environ.get("JARVIS_WAKE_ACK")
+    if fixed:
+        return fixed
+    return random.choice(_WAKE_ACK_POOL)
 
 # Endpointing for the actual query after a wake trigger.
 SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
@@ -186,7 +211,7 @@ def _handle_wake(proc, trigger: str = "clap"):
     # Acknowledge immediately so you know it's your turn to talk, before we
     # start actually recording the real question.
     write_state("speaking", 0.6)
-    speak(WAKE_ACK_PHRASE)
+    speak(_pick_wake_ack())
     _drain_backlog(proc)  # discard mic input captured while the ack played
 
     print("Listening…")
@@ -219,7 +244,7 @@ def _handle_wake(proc, trigger: str = "clap"):
 
     if not text:
         print("(heard nothing usable)")
-        speak("I didn't catch that.")
+        speak("I'm afraid I didn't quite catch that, sir.")
     else:
         print(f"You said: {text}")
         answer = ask_jarvis(text)
