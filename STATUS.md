@@ -572,4 +572,44 @@ stripping for it in `jarvis_client._clean()` alongside the existing
 sources/links/backticks cleanup, so TTS doesn't get asterisks read as
 literal characters (or just silently garbled).
 
+**Update, round nine — real hallucination bugs, not just slowness.** User
+tested via the text-only path (`jarvis_client.py`) and caught the Groq tier
+confidently fabricating things: asked "what model are you using," got
+"OpenAI's GPT-4 architecture" (false — it's Claude, or Groq's gpt-oss-20b
+depending on tier, never GPT-4); asked for a status report, got entirely
+invented data — specific fake CPU%, memory%, uptime, and a fake "security
+patch 1.2" scheduled update, none of which exist anywhere in this system.
+Confirmed the root cause directly rather than guessing: Groq's gpt-oss-20b
+has a strong baked-in self-identity from its own training that overrides
+the JARVIS_PERSONA system prompt specifically for self-referential
+questions, and has zero grounding data for system-status questions so it
+just invents plausible-sounding numbers.
+
+Fixed with three changes, each verified against the real pipeline before
+calling it done:
+1. **Identity questions hard-routed to Claude**, bypassing classify()
+   entirely — Claude self-reports accurately ("Sonnet 5, model ID
+   claude-sonnet-5") every time; Groq has been shown not to. Regex also
+   catches Whisper's phonetic mangling of "pre-prompted" ("prepromted").
+2. **Status-report requests also hard-routed to Claude** — asked the user
+   directly whether they wanted the fast-but-shallow version or the
+   slow-but-actually-verified version (Claude checking real git status and
+   session logs vs. a quick log paraphrase); they chose thorough. Also
+   hard-routed rather than left to classify(), because classify() alone
+   tested inconsistently for this exact phrase (5/5 "lookup" in one
+   isolated batch, "reasoning" in the live run the decision was based on)
+   — a preference this explicit shouldn't ride on classifier sampling
+   variance. Deliberately narrow regex — specific counts like "how many
+   tasks failed" are NOT caught by this, and correctly stay on the fast
+   path (verified: 1.3s vs. ~15s for the broad version).
+3. **Explicit anti-fabrication instruction** added to the shared persona —
+   "never invent technical details you don't have, say so plainly instead"
+   — applies to every tier as a general safety net beyond just these two
+   hard-routed cases.
+4. Smaller: `answer_lookup()` now tries Groq first (grounded in the real
+   task log, same latency class as Ollama's HTTP API, noticeably better
+   synthesis quality) before falling back to Ollama — this is what "good
+   status reports" from a smart model actually needed for the queries that
+   *do* stay on the fast lookup path.
+
 — built overnight by Claude, 2026-09-15
