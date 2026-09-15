@@ -25,3 +25,11 @@ phone/.env
 
 # Runtime logs
 os-bridge/actions.log
+activity.log
+
+# File-bridge runtime data — files you actually dropped in / backups of
+# your real files, not something to track in git
+inbox/*
+backups/*
+!inbox/.gitkeep
+!backups/.gitkeep

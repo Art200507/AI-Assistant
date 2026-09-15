@@ -38,6 +38,7 @@ from pathlib import Path
 
 from pynput import keyboard
 
+from file_bridge import fix_file, latest_inbox_file
 from jarvis_client import ask_jarvis
 from jarvis_voice import transcribe, speak, AUDIO_DEVICE
 from mic_device import describe_selected_device
@@ -129,6 +130,17 @@ def _ends_with_stopword(text: str) -> bool:
 
 def _strip_stopword(text: str) -> str:
     return _STOPWORD_TRAIL_RE.sub("", text).strip()
+
+
+# "Check the inbox" / "fix that file" — a LOCAL intent, detected here on the
+# Mac before anything goes to the server, since only this machine can read
+# the inbox/ folder at all. See file_bridge.py for the actual upload ->
+# Claude-fixes-it -> download -> backup -> log pipeline this triggers.
+_FILE_FIX_RE = re.compile(
+    r"\b(check the inbox|look at (the|that) file|"
+    r"fix (the |that )?(bugs?|file)|fix it)\b",
+    re.IGNORECASE,
+)
 
 # Barge-in: if you start talking while Jarvis is mid-sentence, stop
 # immediately instead of finishing the thought. Threshold has to sit above
@@ -444,7 +456,12 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
             continue  # stay in the conversation, give it another go
 
         print(f"You said: {text}")
-        answer = ask_jarvis(text, session_id=conversation_id)
+        if _FILE_FIX_RE.search(text):
+            print("(local intent: checking inbox for a file to fix)")
+            write_state("thinking", 0.4)
+            answer = fix_file(latest_inbox_file(), session_id=conversation_id)
+        else:
+            answer = ask_jarvis(text, session_id=conversation_id)
         print(f"Jarvis: {answer}")
         interrupted = _speak_interruptible(proc, answer)
         if not interrupted:
