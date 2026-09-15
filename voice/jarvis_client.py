@@ -10,10 +10,23 @@ import subprocess
 from pathlib import Path
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\r")
+# Claude's web-search answers often end with a "Sources: [x](url), [y](url)"
+# line — fine to read on a screen, unbearable read aloud. Strip the whole
+# trailing sources block, and any markdown link syntax that slips through
+# elsewhere, down to just its visible text (never speak a raw URL).
+_SOURCES_BLOCK_RE = re.compile(r"\n{0,2}sources?:.*$", re.IGNORECASE | re.DOTALL)
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(https?://[^\)]+\)")
+_BARE_URL_RE = re.compile(r"https?://\S+")
+_BACKTICK_RE = re.compile(r"`([^`]*)`")
 
 
 def _clean(text: str) -> str:
-    return _ANSI_RE.sub("", text).strip()
+    text = _ANSI_RE.sub("", text)
+    text = _SOURCES_BLOCK_RE.sub("", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _BARE_URL_RE.sub("", text)
+    text = _BACKTICK_RE.sub(r"\1", text)
+    return text.strip()
 
 SSH_HOST = os.environ.get("JARVIS_SSH_HOST", "163.192.207.84")
 SSH_USER = os.environ.get("JARVIS_SSH_USER", "ubuntu")
