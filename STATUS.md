@@ -186,12 +186,36 @@ jokes still too frequent, and generally slow. Fixed:
     anything else on the server — both server-side edits tonight are
     scoped to `jarvis_respond.py`'s `ask_ollama()` and `escalate_to_claude()`.
 
-**Still open — asked you directly rather than guessing**: TTS naturalness.
-Piper is a genuinely synthetic-sounding neural voice; making it sound like
-an actual character rather than "some text-to-speech" means picking between
-options with real tradeoffs (setup effort, speed, quality, and whether it's
-free/local or a paid API) — see the conversation for what I asked and what
-you picked.
+**TTS naturalness**: asked you directly rather than guessing, since the real
+options (macOS built-in / Kokoro / ElevenLabs) trade off setup effort,
+speed, quality, and free-vs-paid differently. You picked: switch to the
+free macOS voice now, decide later on Kokoro/ElevenLabs.
+
+- Switched `jarvis_voice.py`'s `speak()` from Piper to the system `say`
+  command (voice: `Daniel`, en_GB, male — set via `JARVIS_SAY_VOICE`;
+  `JARVIS_TTS_ENGINE=piper` reverts to Piper). Same amplitude-envelope trick
+  as before still works (`say` can output real WAV via
+  `--file-format=WAVE --data-format=LEI16@22050`), so the dashboard avatar
+  still reacts to actual loudness.
+- **I introduced a real bug doing this, then fixed it**: I initially set
+  the voice to `"Daniel (Enhanced)"`, assuming a higher-quality tier was
+  already installed (found asset files on disk that looked like evidence of
+  it, and a hash comparison that seemed to confirm it — both misleading).
+  It isn't actually a registered voice on this Mac (`say -v '?'` only lists
+  plain `Daniel`), and critically: **`say -v <unrecognized name>` does not
+  error — it silently plays the system default voice instead.** That
+  default turned out to be a female US voice, which is what you heard. Now
+  using the verified `Daniel` (confirmed via `say -v '?'`, confirmed by
+  listening), and added a startup check (`_validate_say_voice()`) that
+  prints a loud warning if `JARVIS_SAY_VOICE` is ever set to something not
+  actually installed, instead of silently substituting something else.
+- **If you want the genuinely higher-quality Enhanced/Premium Daniel**: that
+  requires you to download it yourself — System Settings → Accessibility →
+  Spoken Content → System Voice → (i) info button → find Daniel → Download.
+  Once installed, it'll appear as its own exact line in `say -v '?'` (I
+  can't predict the exact string macOS will give it) — copy that string
+  into `JARVIS_SAY_VOICE` and it'll be picked up automatically, with the
+  new startup check confirming it's real.
 
 ## 3. Phone layer (`phone/`) — scaffolded only, inert by design
 
