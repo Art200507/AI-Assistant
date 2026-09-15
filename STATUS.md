@@ -148,6 +148,51 @@ Two pieces, both tested:
   before and after). If this bothers you, the fix is a better lookup model
   or grounding the prompt more strictly — say the word and I'll take a pass.
 
+**Update, later the same night — feedback round two.** Tried it live and
+reported: no real back-and-forth (had to re-trigger every single turn),
+jokes still too frequent, and generally slow. Fixed:
+
+- **Real conversation flow**: `always_on.py` no longer returns to
+  standby after one answer. After speaking, it listens for a follow-up for
+  up to `JARVIS_FOLLOWUP_WAIT_S` (default 7s) with no wake trigger needed —
+  keep talking and it keeps responding. Silence for that long ends the
+  conversation quietly (no "conversation over" announcement, it just goes
+  back to standby) and you clap / hold spacebar again to start a fresh one.
+  The wake acknowledgment now only plays once, at the very start of a
+  conversation, not on every follow-up turn.
+- **Jokes, tightened further**: previously ~1-in-10 *per wake trigger*.
+  Since wake triggers now only happen once per conversation (not once per
+  turn) that alone cut exposure a lot. On top of that, dropped the actual
+  odds to 5% and moved the persona instruction on the server from
+  "occasionally/rarely" to an explicit "~once every ten *conversations*,
+  never twice in the same one, most conversations get zero" — the vaguer
+  wording apparently wasn't restrictive enough for Claude to follow tightly.
+- **Latency — found two real, separate causes, both fixed**:
+  1. `jarvis_client.py` opened a brand new SSH connection for every single
+     question (~0.44s of pure handshake overhead each time). It now reuses
+     one connection (SSH `ControlMaster`/`ControlPersist`) across a whole
+     conversation — measured ~0.44s → ~0.07s per turn after the first.
+  2. Bigger one: the server's `ask_ollama()` shelled out to the `ollama run`
+     CLI, which measured **~1.15s** per call just for CLI startup — and
+     lookup questions make *two* such calls (classify, then answer). Switched
+     it to Ollama's local HTTP API instead (same model, same machine,
+     `localhost:11434`) — measured **~0.28s**, about 4x faster, and it also
+     stopped being the source of the stray ANSI/spinner codes I was
+     patching around client-side. Measured before/after on real questions:
+     9.3s and 11.5s → 1.7s and 3.6s. A `claude -p` reasoning question is
+     still bounded by however long Claude actually takes to think — that
+     part isn't compressible from this side.
+  - I did not touch `orchestrator.py`, `classify()`'s routing logic, or
+    anything else on the server — both server-side edits tonight are
+    scoped to `jarvis_respond.py`'s `ask_ollama()` and `escalate_to_claude()`.
+
+**Still open — asked you directly rather than guessing**: TTS naturalness.
+Piper is a genuinely synthetic-sounding neural voice; making it sound like
+an actual character rather than "some text-to-speech" means picking between
+options with real tradeoffs (setup effort, speed, quality, and whether it's
+free/local or a paid API) — see the conversation for what I asked and what
+you picked.
+
 ## 3. Phone layer (`phone/`) — scaffolded only, inert by design
 
 Full Twilio integration code exists and is syntax-checked, but **cannot run
