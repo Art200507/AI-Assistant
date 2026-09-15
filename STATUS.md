@@ -424,4 +424,50 @@ plus confirming Ollama is in fact doing its job.
   direct API billing, which I flagged as your call to make, not mine to
   assume, a few rounds back.
 
+**Update, round five — a real conversation transcript, diagnosed and fixed.**
+You pasted a full back-and-forth and asked me to find the problems myself
+rather than list them for me. Found two real bugs and confirmed one thing
+was working as designed:
+
+- **The big one, now fixed: zero conversation memory.** Every turn was
+  being sent to Claude as a completely fresh, isolated call — no memory of
+  anything said earlier in the same conversation. This is why `"and
+  model."` (continuing "what mode... and model [are you using]?") got a
+  nonsense generic reply, and why asking "do you remember what I asked?"
+  got an honest "no, this is the start of our conversation" — Claude was
+  telling the truth about the architecture. Root cause: I'd built
+  turn-taking continuity at the *audio* layer (stays listening, no
+  re-trigger needed) but never threaded actual conversation history into
+  the backend calls. Fixed properly: `claude -p` supports real session
+  continuity via `--session-id`/`--resume` (verified directly — a fresh
+  session correctly remembered "42" after being told it, a nonexistent
+  session ID fails cleanly rather than silently starting fresh). Generate
+  one UUID per voice conversation, in `always_on.py`, resume it (falling
+  back to creating it fresh if this is the first Claude call of that
+  conversation), pass it through as JSON over stdin instead of raw text.
+  **Verified against the exact failure from your transcript**: re-asked
+  "What mode are you using?" → "and model." → "Do you remember what I just
+  asked you?" as a real 3-turn session. It now answers the fragment
+  correctly and accurately recalls both prior questions. Also moved the
+  persona from being prepended to your message every time to
+  `--append-system-prompt` (the correct mechanism — adds to Claude's
+  built-in system prompt instead of just being extra text in the user
+  turn).
+- **Real bug, probably fixed, not fully verified: "stand down" got
+  captured as just "down."** Best explanation: real words often start
+  quiet and ramp up in volume, so the soft onset of "stand" likely sat
+  under the RMS threshold before crossing it partway through the word —
+  a known failure mode of any hard-threshold voice detector, not specific
+  to this implementation. Added a pre-roll buffer: the last 160ms before
+  voice is detected is always kept and prepended once it crosses the
+  threshold, so a quiet onset isn't lost. Logic-verified and integration
+  tested; the actual acoustic fix needs you trying it for real to confirm.
+- **Not a bug, confirmed by design**: declining to guess at the weather
+  without knowing your location. Your call whether you want real weather
+  capability — would need your location passed in somehow.
+- **Minor, low priority**: "what mode are you using" got a slightly hollow
+  answer once ("standard mode, no toggles") — there's no real "mode"
+  concept in this system, so that's Claude making something plausible-but-
+  empty out of an ill-defined question. Not worth engineering around.
+
 — built overnight by Claude, 2026-09-15
