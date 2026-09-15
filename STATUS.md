@@ -315,4 +315,56 @@ the flag, per your instruction.
 4. Read `os-bridge/actions.log` after playing with `os_control.py` a bit,
    then flip `SAFE_MODE = False` yourself when you're comfortable.
 
+**Update, round three.** Three asks: full shell/web access for voice
+conversation, shorter answers, and (again) TTS — the macOS voice didn't
+land. All three landed on the server's `jarvis_respond.py` plus a new local
+TTS engine.
+
+- **Full Bash/Web access for the conversational path — your explicit
+  choice, after being told the real risk**: this is voice-triggered and
+  Whisper can mishear you; "no sudo" doesn't prevent a misheard phrase from
+  deleting files, changing configs, or making network calls as your user.
+  You picked full access anyway. `escalate_to_claude()` now runs with
+  `--allowedTools "Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch"
+  --dangerously-skip-permissions` (the skip-permissions flag is *required*
+  for headless tool calls to actually execute — without it they just hang,
+  which is why the very first Write attempt days ago failed silently).
+  Scoped to a new `~/jarvis-workspace/` directory on the server, kept
+  separate from `~/JARVIS` (the orchestrator's own territory, which
+  auto-commits on its own schedule — didn't want voice-triggered Bash/git
+  activity colliding with that). Verified live: it correctly reported its
+  own cwd, confirmed it wasn't a git repo, and answered a real web search.
+- **GitHub access, so it can create/push repos of its own** — installed
+  `gh` (GitHub CLI) on the server and started the device-auth flow.
+  **This needs you** — if you haven't finished it: open
+  `https://github.com/login/device` and enter the code from the terminal
+  (a fresh one was issued if the first expired — check the conversation for
+  the current code). Once `gh auth status` shows logged in, the last step
+  is `gh auth setup-git` so plain `git push` also authenticates, which I'll
+  run once you confirm login succeeded.
+- **Shorter answers**: `JARVIS_PERSONA` on the server now explicitly says
+  this is a live spoken conversation, default to 2-4 sentences, lead with
+  the actual answer, only go longer when the material genuinely can't fit
+  (real multi-step reasoning, code). Verified live — a question that
+  previously got a 3-paragraph answer now gets 3 sentences that still
+  actually answer it.
+- **TTS, again — macOS's Daniel wasn't good enough for you.** Set up
+  Kokoro (local, open-weights, noticeably more natural than both Piper and
+  macOS). Real friction along the way, worth knowing about:
+  - `kokoro-onnx`'s latest model release (`model-files-v1.1`) is NOT
+    compatible with `kokoro-onnx==0.4.7` (the current pip package) — throws
+    an ONNX dtype error on every voice. Had to drop back to the
+    `model-files-v1.0` release's `kokoro-v1.0.onnx` (325MB) to get working
+    synthesis. If you ever `pip install --upgrade kokoro-onnx`, the model
+    files may need re-pairing to whatever version that release expects.
+  - Generated and played all 4 British-male voices (`bm_daniel`, `bm_fable`,
+    `bm_george`, `bm_lewis`) live so you could pick by ear rather than me
+    guessing — you picked **`bm_daniel`**.
+  - Real tradeoff, measured: ~2.8s to synthesize a 4-second sentence, vs
+    macOS's near-instant. The sentence-pipelined playback (built two rounds
+    ago) hides some of this for multi-sentence answers but the first
+    sentence's synthesis time is unavoidable added latency. `macos` and
+    `piper` are both still one env var away (`JARVIS_TTS_ENGINE`) if this
+    trade isn't worth it once you've lived with it.
+
 — built overnight by Claude, 2026-09-15
