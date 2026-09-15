@@ -470,4 +470,39 @@ was working as designed:
   concept in this system, so that's Claude making something plausible-but-
   empty out of an ill-defined question. Not worth engineering around.
 
+**Update, round six — two more real fixes.**
+
+- **Session scope was wrong.** Round five's conversation-memory fix minted
+  a new session UUID on every wake trigger, so memory reset any time there
+  was a pause long enough to end one "conversation." Moved it up a level:
+  one UUID generated once when `always_on.py` starts, printed at startup,
+  reused for every wake trigger for the life of that process. Only
+  restarting the script starts fresh. A full context window is left to
+  Claude Code's own autocompact rather than us minting a new session on
+  purpose — a fresh session would just throw away the memory this whole
+  fix was for.
+- **Silence-length cutoff replaced with an explicit stop word.** Any fixed
+  pause threshold is wrong for someone part of the time — too short cuts
+  you off mid-thought, too long feels laggy. Now: say "Jarvis" to end your
+  turn, like a radio sign-off. A pause is just a checkpoint, not a hard
+  stop — whatever's been said gets transcribed and checked for a trailing
+  "Jarvis"; if it's not there, recording continues regardless of how long
+  the pause was. A silence fallback (4s) still exists purely for when you
+  forget to say it. Unit-tested the matching logic directly (correctly
+  ignores "Jarvis" appearing mid-sentence, only triggers when it's the
+  literal last word) and ran the full state machine end-to-end without
+  crashing. **Honest gap**: I could not cleanly verify the full
+  acoustic path (spoken "...Jarvis" → correctly detected) myself. My only
+  test proxy — playing synthesized audio through the speakers and
+  re-capturing it via the mic (the same trick that worked for measuring
+  barge-in echo levels) — produces audio degraded enough by the
+  speaker→air→mic round trip that Whisper hallucinated unrelated text
+  instead of transcribing it accurately, on a phrase that should have been
+  easy. That's a real limitation of bounced audio as a test signal, not
+  necessarily a bug in the detection logic — but it means this one
+  genuinely needs your real voice to confirm before I'd call it done. If
+  "Jarvis" doesn't reliably end your turn, tell me exactly what happened
+  (what you said, what it transcribed) and I'll dig in with real data
+  instead of another synthetic proxy.
+
 — built overnight by Claude, 2026-09-15
