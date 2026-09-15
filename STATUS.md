@@ -505,4 +505,50 @@ was working as designed:
   (what you said, what it transcribed) and I'll dig in with real data
   instead of another synthetic proxy.
 
+**Update, round seven — 3-tier model routing (Gemini Flash added).**
+
+- **Architecture clarified**: cloud-Claude (on the Oracle server) has never
+  had, and still doesn't have, any access to this Mac. Two fully separate
+  machines; only text crosses over SSH.
+- **Gemini Flash wired in as a fast/cheap tier for simple questions**
+  ("how are you", "what does X mean", "what's the weather") — this was the
+  user's explicit ask to stop paying Claude-latency for things that don't
+  need it. Key provided, tested directly against the API first: it
+  authenticates fine, but the linked Google project currently has **zero
+  prepaid credits** — `gemini-2.5-flash` is deprecated (had to switch to
+  `gemini-3.6-flash`), and calls fail with `RESOURCE_EXHAUSTED` until
+  credits are added at ai.studio/projects. That's a billing step for the
+  user, not something to work around. `ask_gemini()` returns `None` on any
+  failure and `answer_simple()` falls back to Claude cleanly — nothing
+  breaks in the meantime, it's just not faster yet. Key stored server-side
+  at `~/.jarvis_gemini_key` (not in the git repo).
+- **Shared cross-model transcript** — added because introducing a third,
+  stateless model right after fixing conversation memory would have broken
+  it again through the side door: Gemini has no memory of its own, so a
+  "simple" turn handled by Gemini would vanish from Claude's awareness the
+  moment the conversation crossed tiers. Every turn (whichever tier
+  answers it) gets appended to `~/jarvis-workspace/sessions/<uuid>.json`;
+  Gemini calls get the recent transcript prepended as context, Claude
+  calls get any Gemini-only turns injected (its own `--resume` history
+  already covers turns it handled itself).
+- **Caught and fixed a real regression before it mattered**: the first
+  version of the 3-way classifier prompt broke task-log lookups — "how
+  many tasks failed" started getting routed to "reasoning" instead of
+  "lookup" (100% reproducible, verified directly against Ollama). The
+  2-way prompt it replaced got this right every time. Root cause: vague
+  category descriptions gave the 3B model too much room to confuse
+  adjacent categories. Fixed with explicit trigger words and concrete
+  examples per category, verified 100% consistent across 8 test queries
+  spanning all three routes before deploying. **Known minor imperfection**:
+  "can you search the web for the news" classifies as "simple" rather than
+  "reasoning" — doesn't matter today since Gemini falls back to Claude
+  anyway, but once Gemini is actually working, a request needing
+  WebSearch could get routed to a tier with no tool access. Small
+  follow-up needed once billing is sorted.
+- **Not yet addressed**: the broader "make it more like OpenClaw, more
+  plugins/features" ask. Flagged rather than guessed at — that's a big
+  enough decision (which integrations, what permissions, what's actually
+  worth building) that it deserves its own focused pass rather than being
+  squeezed in alongside everything else tonight.
+
 — built overnight by Claude, 2026-09-15
