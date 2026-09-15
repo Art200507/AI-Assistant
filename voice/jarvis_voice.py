@@ -30,6 +30,18 @@ PIPER_BIN = os.environ.get("PIPER_BIN", str(HERE.parent / ".venv" / "bin" / "pip
 PIPER_MODEL = os.environ.get(
     "PIPER_MODEL", str(HERE / "models" / "piper" / "en_GB-alan-medium.onnx")
 )
+
+# TTS engine: "macos" (default) uses the system `say` command with the
+# Enhanced-quality Daniel voice, already installed on this Mac — noticeably
+# more natural than Piper's medium-quality model, zero extra setup. Set
+# JARVIS_TTS_ENGINE=piper to go back to Piper (e.g. for comparison, or on a
+# machine where the enhanced voice isn't installed — check with
+# `say -v '?'`, and if missing, System Settings -> Accessibility -> Spoken
+# Content -> System Voice lets you download it).
+TTS_ENGINE = os.environ.get("JARVIS_TTS_ENGINE", "macos")
+SAY_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel (Enhanced)")
+SAY_SAMPLE_RATE = 22050
+
 AUDIO_DEVICE = resolve_audio_device()  # auto-picks the real mic by name; JARVIS_AUDIO_DEVICE overrides
 
 CHUNK_MS = 60
@@ -96,13 +108,8 @@ def _amplitude_envelope(wav_path: str, chunk_ms: int = CHUNK_MS):
     return envelope
 
 
-def speak(text: str):
-    if not text:
-        write_state("idle", 0.0)
-        return
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        out_wav = tmp.name
-    try:
+def _synthesize(text: str, out_wav: str):
+    if TTS_ENGINE == "piper":
         subprocess.run(
             [PIPER_BIN, "-m", PIPER_MODEL, "-f", out_wav],
             input=text,
@@ -110,6 +117,27 @@ def speak(text: str):
             capture_output=True,
             timeout=60,
         )
+    else:
+        subprocess.run(
+            [
+                "say", "-v", SAY_VOICE, "-o", out_wav,
+                "--file-format=WAVE", f"--data-format=LEI16@{SAY_SAMPLE_RATE}",
+                text,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+
+def speak(text: str):
+    if not text:
+        write_state("idle", 0.0)
+        return
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        out_wav = tmp.name
+    try:
+        _synthesize(text, out_wav)
         envelope = _amplitude_envelope(out_wav)
         player = subprocess.Popen(["afplay", out_wav])
         for amp in envelope:
