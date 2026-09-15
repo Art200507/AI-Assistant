@@ -1,28 +1,37 @@
-"""JARVIS always-on mode: clap to wake, speak, get an answer — no keypress.
+"""JARVIS always-on mode: clap OR a long spacebar hold wakes it up.
 
 Runs one persistent ffmpeg process streaming raw mic audio to this process.
 While idle, every ~20ms chunk is checked for a clap (a sharp amplitude
-transient well above the recent ambient noise floor). On a detected clap,
-it switches into "listening" and buffers real audio until you stop talking
-(silence-based endpointing), then runs it through the same transcribe ->
-ask_jarvis -> speak pipeline as the push-to-talk script (jarvis_voice.py).
+transient well above the recent ambient noise floor). In parallel, a global
+keyboard listener watches for the spacebar being held down for at least
+LONG_PRESS_SECONDS. Either one wakes Jarvis the same way: it speaks a short
+acknowledgment ("What's up?"), then listens and buffers real audio until you
+stop talking (silence-based endpointing), then runs it through the same
+transcribe -> ask_jarvis -> speak pipeline as the push-to-talk script
+(jarvis_voice.py).
 
-This is amplitude/transient-based clap detection, not a trained classifier
-— it can be fooled by other sharp sounds (a dropped object, a door) and may
-need JARVIS_CLAP_RATIO / JARVIS_CLAP_ABS_MIN tuned to your room. See the
-tuning section in STATUS.md.
+Clap detection is amplitude/transient-based, not a trained classifier — it
+can be fooled by other sharp sounds (a dropped object, a door) and may need
+JARVIS_CLAP_RATIO / JARVIS_CLAP_ABS_MIN tuned to your room (run with
+--calibrate). The spacebar listener needs Accessibility permission the
+first time (System Settings -> Privacy & Security -> Accessibility -> allow
+your terminal app) since it's a global hotkey, not tied to any window.
 """
 import os
 import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
 
+from pynput import keyboard
+
 from jarvis_client import ask_jarvis
 from jarvis_voice import transcribe, speak, AUDIO_DEVICE
+from mic_device import describe_selected_device
 from voice_state import write_state
 
 SAMPLE_RATE = 16000
@@ -35,12 +44,52 @@ CLAP_RATIO = float(os.environ.get("JARVIS_CLAP_RATIO", "6.0"))
 CLAP_ABS_MIN = float(os.environ.get("JARVIS_CLAP_ABS_MIN", "1800"))
 CLAP_COOLDOWN_S = 1.0
 
-# Endpointing for the actual query after a clap wakes it up.
+# How long the spacebar must be held down (while still held, not on release)
+# before it counts as a wake trigger — short taps do nothing.
+LONG_PRESS_SECONDS = float(os.environ.get("JARVIS_LONG_PRESS_SECONDS", "0.6"))
+
+# What Jarvis says the instant it wakes, before it starts actually listening
+# for your real question — gives you an audible cue that it's your turn to talk.
+WAKE_ACK_PHRASE = os.environ.get("JARVIS_WAKE_ACK", "Yes? What's up?")
+
+# Endpointing for the actual query after a wake trigger.
 SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
 SILENCE_HANG_MS = 1000
 MAX_UTTERANCE_S = 12
 
 UTTERANCE_WAV = "/tmp/jarvis_clap_utterance.wav"
+
+
+class SpacebarWaker:
+    """Fires `event` once the spacebar has been held for LONG_PRESS_SECONDS,
+    while it's still held down — not on release. A short tap never fires."""
+
+    def __init__(self):
+        self.event = threading.Event()
+        self._down = False
+        self._generation = 0
+        self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
+
+    def start(self):
+        self._listener.start()
+
+    def stop(self):
+        self._listener.stop()
+
+    def _on_press(self, key):
+        if key == keyboard.Key.space and not self._down:
+            self._down = True
+            self._generation += 1
+            gen = self._generation
+            threading.Timer(LONG_PRESS_SECONDS, self._check, args=(gen,)).start()
+
+    def _check(self, gen):
+        if self._down and gen == self._generation:
+            self.event.set()
+
+    def _on_release(self, key):
+        if key == keyboard.Key.space:
+            self._down = False
 
 
 def _rms(chunk_bytes: bytes) -> float:
@@ -110,9 +159,11 @@ def _kill_stream(proc):
             pass
 
 
-def _install_signal_cleanup(proc):
+def _install_signal_cleanup(proc, waker=None):
     def _handler(signum, frame):
         write_state("idle", 0.0)
+        if waker is not None:
+            waker.stop()
         _kill_stream(proc)
         sys.exit(0)
 
@@ -128,8 +179,17 @@ def _write_wav(path: str, pcm_bytes: bytes):
         wf.writeframes(pcm_bytes)
 
 
-def _handle_wake(proc):
-    print("\n\U0001f44f Clap detected — listening…")
+def _handle_wake(proc, trigger: str = "clap"):
+    label = "\U0001f44f Clap" if trigger == "clap" else "⌨️  Spacebar held"
+    print(f"\n{label} — waking up…")
+
+    # Acknowledge immediately so you know it's your turn to talk, before we
+    # start actually recording the real question.
+    write_state("speaking", 0.6)
+    speak(WAKE_ACK_PHRASE)
+    _drain_backlog(proc)  # discard mic input captured while the ack played
+
+    print("Listening…")
     write_state("listening", 0.5)
     buffer = bytearray()
     silence_ms = 0
@@ -205,7 +265,7 @@ def _calibrate():
     """Live RMS meter — run this, clap a few times, and read off real
     numbers instead of guessing at a threshold."""
     print("=== JARVIS clap calibration ===")
-    print(f"mic device index: {AUDIO_DEVICE} (override with JARVIS_AUDIO_DEVICE)")
+    print(f"mic: {describe_selected_device(AUDIO_DEVICE)} (override with JARVIS_AUDIO_DEVICE)")
     print("Watch the numbers. Clap normally a few times and see what they hit.")
     print("Ctrl+C to stop.\n")
     proc = _open_mic_stream()
@@ -238,18 +298,24 @@ def _calibrate():
 
 
 def main():
-    print("=== JARVIS always-on (clap to talk) ===")
-    print(f"mic device index: {AUDIO_DEVICE} (override with JARVIS_AUDIO_DEVICE)")
+    print("=== JARVIS always-on (clap OR long spacebar hold to talk) ===")
+    print(f"mic: {describe_selected_device(AUDIO_DEVICE)} (override with JARVIS_AUDIO_DEVICE)")
     print(f"clap threshold: {CLAP_RATIO}x ambient noise floor, min {CLAP_ABS_MIN}")
+    print(f"spacebar: hold for {LONG_PRESS_SECONDS}s (needs Accessibility permission")
+    print("  for your terminal app — System Settings -> Privacy & Security ->")
+    print("  Accessibility — if it doesn't seem to respond the first time)")
     print("Ctrl+C to quit.\n")
     write_state("idle", 0.0)
 
     proc = _open_mic_stream()
-    _install_signal_cleanup(proc)
     avg = _sanity_check(proc, seconds=1.0)
     noise_floor = max(avg, 50.0)
     prev_level = 0.0
     last_clap_time = 0.0
+
+    waker = SpacebarWaker()
+    waker.start()
+    _install_signal_cleanup(proc, waker)
 
     try:
         while True:
@@ -269,14 +335,19 @@ def main():
             prev_level = level
 
             now = time.time()
-            if is_spike and was_quiet and (now - last_clap_time) > CLAP_COOLDOWN_S:
+            clap_hit = is_spike and was_quiet and (now - last_clap_time) > CLAP_COOLDOWN_S
+            space_hit = waker.event.is_set()
+
+            if clap_hit or space_hit:
+                waker.event.clear()
                 last_clap_time = now
-                _handle_wake(proc)
+                _handle_wake(proc, trigger="clap" if clap_hit else "spacebar")
                 prev_level = 0.0
     except KeyboardInterrupt:
         pass
     finally:
         write_state("idle", 0.0)
+        waker.stop()
         _kill_stream(proc)
         print("\nShutting down.")
 

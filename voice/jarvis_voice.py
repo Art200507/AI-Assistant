@@ -18,6 +18,7 @@ import wave
 from pathlib import Path
 
 from jarvis_client import ask_jarvis
+from mic_device import resolve_audio_device, describe_selected_device
 from voice_state import write_state
 
 HERE = Path(__file__).parent
@@ -29,7 +30,7 @@ PIPER_BIN = os.environ.get("PIPER_BIN", str(HERE.parent / ".venv" / "bin" / "pip
 PIPER_MODEL = os.environ.get(
     "PIPER_MODEL", str(HERE / "models" / "piper" / "en_GB-alan-medium.onnx")
 )
-AUDIO_DEVICE = os.environ.get("JARVIS_AUDIO_DEVICE", "1")  # see `ffmpeg -f avfoundation -list_devices true -i ""`
+AUDIO_DEVICE = resolve_audio_device()  # auto-picks the real mic by name; JARVIS_AUDIO_DEVICE overrides
 
 CHUNK_MS = 60
 
@@ -147,7 +148,7 @@ def main():
     print("=== JARVIS voice interface ===")
     print(f"whisper: {WHISPER_BIN} ({WHISPER_MODEL})")
     print(f"piper:   {PIPER_BIN} ({PIPER_MODEL})")
-    print(f"mic device index: {AUDIO_DEVICE} (override with JARVIS_AUDIO_DEVICE)")
+    print(f"mic: {describe_selected_device(AUDIO_DEVICE)} (override with JARVIS_AUDIO_DEVICE)")
     print("Press Enter to start each turn, Ctrl+C to quit.\n")
     write_state("idle", 0.0)
     while True:

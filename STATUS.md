@@ -85,6 +85,35 @@ the frontend further).
   `python3 voice/jarvis_voice.py` (inside `.venv`) and try it; I'd genuinely
   expect it to work first try, but say so if anything's off.
 
+### Always-on mode (`voice/always_on.py`) — clap or long spacebar hold
+
+No keypress needed to start a turn:
+- **Clap detection**: one persistent `ffmpeg` stream, checked every ~20ms
+  for a sharp amplitude transient well above the room's ambient noise floor
+  (edge-triggered, with a cooldown so one clap doesn't fire twice). Tunable
+  via `JARVIS_CLAP_RATIO` / `JARVIS_CLAP_ABS_MIN`. Run
+  `python3 always_on.py --calibrate` for a live numeric meter to tune these
+  against your actual room instead of guessing — it marks
+  `<-- WOULD TRIGGER` in real time as you clap.
+- **Long spacebar hold**: a global keyboard listener (`pynput`) fires once
+  the spacebar's been held ≥`JARVIS_LONG_PRESS_SECONDS` (default 0.6s)
+  *while still held* — a quick tap does nothing. This is global (works even
+  if the terminal isn't the focused window), which means macOS will ask you
+  to grant your terminal app Accessibility permission the first time
+  (System Settings → Privacy & Security → Accessibility).
+- **Either trigger** leads to the same flow: Jarvis speaks a short
+  acknowledgment ("Yes? What's up?", configurable via `JARVIS_WAKE_ACK`) so
+  you know it's your turn, *then* starts recording your actual question,
+  stopping on ~1s of silence, then the normal transcribe → ask → speak path.
+- Startup runs a **mic sanity check** (prints avg/peak signal level) and
+  warns explicitly if the stream looks silent, rather than just hanging
+  forever waiting for a clap that can never register. This is what caught
+  the mic-device-instability bug described above.
+- Also fixed tonight: Ctrl+C wasn't reliably killing the background
+  `ffmpeg` process, which could hold the mic device and starve the *next*
+  run of audio entirely — added explicit SIGINT/SIGTERM handlers plus a
+  terminate-then-kill fallback; verified clean process exit on interrupt.
+
 ## 3. Phone layer (`phone/`) — scaffolded only, inert by design
 
 Full Twilio integration code exists and is syntax-checked, but **cannot run
@@ -149,11 +178,18 @@ the flag, per your instruction.
 
 ## Questions / things I wasn't sure about (didn't guess)
 
-- **Mic device index**: `voice/jarvis_voice.py` defaults to avfoundation
-  audio device `1`, which enumerated as "MacBook Air Microphone" on this
-  machine tonight. If you ever plug in an external mic, override with
-  `JARVIS_AUDIO_DEVICE=<n>` (run `ffmpeg -f avfoundation -list_devices true
-  -i ""` to see current indices — they can shift).
+- **Mic device index — this bit me tonight, worth knowing.** avfoundation
+  device indices aren't stable; opening Teams added a "Microsoft Teams
+  Audio" virtual device that bumped the real mic from index 1 to index 0.
+  A script hardcoded to index 1 then silently recorded pure silence from
+  the Teams virtual device — no error, just zero signal, which is exactly
+  what "claps aren't triggering" looks like. Fixed by adding
+  `voice/mic_device.py`, which picks the real microphone **by name** every
+  run (skips anything with "teams"/"virtual"/"aggregate"/"blackhole" in the
+  name) — both `jarvis_voice.py` and `always_on.py` use it now instead of a
+  hardcoded index. `JARVIS_AUDIO_DEVICE` still overrides it if you ever need
+  to force a specific device. Run `python3 voice/mic_device.py` any time to
+  see what it would currently pick.
 - **Whisper model size**: I picked `base.en` (148MB, fast, good enough on an
   M4) over `small`/`medium` for responsiveness. If you find accuracy lacking
   on accented or noisy speech, `WHISPER_MODEL` env var swaps it — just
