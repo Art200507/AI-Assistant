@@ -343,15 +343,9 @@ def _speak_interruptible(proc, text: str) -> bool:
     return interrupt_event.is_set()
 
 
-def _handle_wake(proc, trigger: str = "clap"):
+def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
     label = "\U0001f44f Clap" if trigger == "clap" else "⌨️  Spacebar held"
     print(f"\n{label} — waking up…")
-
-    # One session_id for this whole conversation (reset on every new wake
-    # trigger) — this is what gives Claude actual memory across follow-up
-    # turns via `claude --resume`, instead of answering each turn in total
-    # isolation. See jarvis_respond.escalate_to_claude on the server.
-    conversation_id = str(uuid.uuid4())
 
     # Acknowledge immediately so you know it's your turn to talk, before we
     # start actually recording the real question. Only said once per
@@ -482,6 +476,15 @@ def main():
     print("Ctrl+C to quit.\n")
     write_state("idle", 0.0)
 
+    # One Claude session for the entire life of this process, not one per
+    # wake trigger — a long pause between claps shouldn't mean Jarvis has
+    # forgotten what you talked about an hour ago. Only resets if you
+    # actually restart this script; a full context window is handled by
+    # Claude Code's own autocompact within the session, not by us minting
+    # a new one.
+    conversation_id = str(uuid.uuid4())
+    print(f"session: {conversation_id} (persists until this process restarts)\n")
+
     proc = _open_mic_stream()
     avg = _sanity_check(proc, seconds=1.0)
     noise_floor = max(avg, 50.0)
@@ -516,7 +519,7 @@ def main():
             if clap_hit or space_hit:
                 waker.event.clear()
                 last_clap_time = now
-                _handle_wake(proc, trigger="clap" if clap_hit else "spacebar")
+                _handle_wake(proc, conversation_id, trigger="clap" if clap_hit else "spacebar")
                 prev_level = 0.0
     except KeyboardInterrupt:
         pass
