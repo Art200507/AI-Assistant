@@ -367,4 +367,61 @@ TTS engine.
     `piper` are both still one env var away (`JARVIS_TTS_ENGINE`) if this
     trade isn't worth it once you've lived with it.
 
+**Update, round four.** Sources being read aloud, no way to interrupt,
+question intonation sounding flat, and continued frustration with speed —
+plus confirming Ollama is in fact doing its job.
+
+- **Sources/citations no longer spoken**: a WebSearch answer used to come
+  back with a trailing "Sources: [x](url), [y](url)" block that got read
+  aloud verbatim, URLs and all. `jarvis_client.py`'s `_clean()` now strips
+  the whole sources block, converts any markdown link to just its visible
+  text (never speaks a raw URL), and drops backticks too. Tested against
+  the exact response that triggered this.
+- **Barge-in — talk over Jarvis and it stops, immediately**: real feature,
+  not a toggle. A background thread watches the mic *while* Jarvis is
+  speaking; several consecutive loud chunks (not just one, so a click/pop
+  doesn't falsely trigger) kills playback mid-sentence and the rest of what
+  you're saying gets captured as your actual turn — no need to wait it out
+  or re-trigger. Had a real bug here I caught by testing rather than
+  shipping blind: my first threshold guess (1200) made Jarvis interrupt
+  *itself* constantly, because its own voice leaking from the speakers back
+  into the mic during playback measured up to 1365 RMS — sat right in my
+  threshold's range. Measured the actual echo level directly (p50 372, p90
+  828, p99 1227, max 1365) and moved the threshold to 2000 for real
+  headroom. Confirmed fixed: a full sentence now plays to completion
+  without self-interrupting. **Not yet confirmed**: that 2000 is low enough
+  to actually catch you interrupting at normal talking volume — I can't
+  test that side myself (would need an actual human voice at the mic).
+  Try it; if it doesn't trigger when you talk over it, `JARVIS_BARGE_IN_RMS`
+  is the knob, lower it a bit.
+- **Question intonation sounding flat**: looked into it rather than
+  guessing. Confirmed the "?" reaches Kokoro intact (none of the cleaning
+  regexes touch punctuation), and `Kokoro.create()` exposes no
+  prosody/intonation parameter at all — just text, voice, speed, language.
+  Whatever rising/falling inflection it produces is baked into the model's
+  training, not something tunable from the outside. Generated a genuine
+  question and a matched statement back to back so you can judge the
+  difference yourself. If this matters a lot, it's a real point in favor of
+  ElevenLabs (which does proper prosody) over any local model — Kokoro,
+  Piper, and macOS's Daniel are all going to have similar flatness, it's
+  not specific to this one voice.
+- **On "why isn't Ollama doing anything / is it even active" — it is,
+  confirmed, this isn't a bug**: Ollama handles two things — classifying
+  every question as lookup-vs-reasoning, and fully answering lookup
+  questions about the task log (already sped up 4x this session via its
+  HTTP API instead of shelling out to the CLI). It was never going to
+  handle real conversation — a local 3B model attempting the personality,
+  reasoning, and reliability you're asking for would be a worse experience
+  than Claude, not a faster acceptable one; that's exactly the kind of
+  quality-vs-speed tradeoff already causing friction with Kokoro's voice.
+  The genuine bottleneck for reasoning questions is Claude's actual
+  response time — real thinking, over the network, bounded by however long
+  that takes. I already pulled the levers available without changing that
+  architecture (SSH connection reuse, Ollama's speed, sentence-pipelined
+  TTS so playback starts before the full answer is even synthesized). The
+  one remaining lever — true token-by-token streaming so it starts talking
+  mid-generation — needs switching off the Claude Pro subscription to
+  direct API billing, which I flagged as your call to make, not mine to
+  assume, a few rounds back.
+
 — built overnight by Claude, 2026-09-15
