@@ -1,0 +1,24 @@
+# Node / frontend
+dashboard/node_modules/
+dashboard/dist/
+
+# Rust / Tauri
+dashboard/src-tauri/target/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Models (large binaries, fetch separately)
+voice/models/
+*.onnx
+*.bin
+*.gguf
+
+# Local secrets
+phone/.env
+*.key
+
+# Audio artifacts
+*.wav

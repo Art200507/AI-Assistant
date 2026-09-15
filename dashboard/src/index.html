@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>J.A.R.V.I.S. — Status</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="scanlines"></div>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">J.A.R.V.I.S.</span>
+          <span class="brand-sub">STATUS INTERFACE</span>
+        </div>
+        <div class="topbar-mid">
+          <div class="conn" id="conn">
+            <span class="conn-dot" id="conn-dot"></span>
+            <span id="conn-label">CONNECTING…</span>
+          </div>
+          <div class="svc" id="svc">
+            <span class="svc-label">ORCHESTRATOR</span>
+            <span class="svc-value" id="svc-value">—</span>
+          </div>
+        </div>
+        <div class="clock" id="clock">00:00:00</div>
+      </header>
+
+      <section class="hud-row">
+        <div class="ring-panel panel">
+          <div class="panel-corner tl"></div>
+          <div class="panel-corner tr"></div>
+          <div class="panel-corner bl"></div>
+          <div class="panel-corner br"></div>
+          <svg viewBox="0 0 220 220" class="ring">
+            <circle cx="110" cy="110" r="95" class="ring-track" />
+            <circle cx="110" cy="110" r="95" class="ring-seg seg-done" id="seg-done" />
+            <circle cx="110" cy="110" r="95" class="ring-seg seg-skipped" id="seg-skipped" />
+            <circle cx="110" cy="110" r="95" class="ring-seg seg-failed" id="seg-failed" />
+            <circle cx="110" cy="110" r="95" class="ring-seg seg-approval" id="seg-approval" />
+            <circle cx="110" cy="110" r="72" class="ring-inner" />
+          </svg>
+          <div class="ring-center">
+            <div class="ring-total" id="ring-total">0</div>
+            <div class="ring-total-label">TASKS</div>
+          </div>
+        </div>
+
+        <div class="stat-grid">
+          <div class="stat-card panel" data-kind="done">
+            <div class="panel-corner tl"></div><div class="panel-corner br"></div>
+            <div class="stat-label">DONE</div>
+            <div class="stat-value" id="count-done">0</div>
+          </div>
+          <div class="stat-card panel" data-kind="skipped">
+            <div class="panel-corner tl"></div><div class="panel-corner br"></div>
+            <div class="stat-label">SKIPPED</div>
+            <div class="stat-value" id="count-skipped">0</div>
+          </div>
+          <div class="stat-card panel" data-kind="failed">
+            <div class="panel-corner tl"></div><div class="panel-corner br"></div>
+            <div class="stat-label">FAILED</div>
+            <div class="stat-value" id="count-failed">0</div>
+          </div>
+          <div class="stat-card panel" data-kind="approval">
+            <div class="panel-corner tl"></div><div class="panel-corner br"></div>
+            <div class="stat-label">NEEDS APPROVAL</div>
+            <div class="stat-value" id="count-approval">0</div>
+          </div>
+          <div class="stat-card panel wide" data-kind="workers">
+            <div class="panel-corner tl"></div><div class="panel-corner br"></div>
+            <div class="stat-label">WORKER LOAD</div>
+            <div class="worker-bars" id="worker-bars"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="log-panel panel">
+        <div class="panel-corner tl"></div>
+        <div class="panel-corner tr"></div>
+        <div class="panel-corner bl"></div>
+        <div class="panel-corner br"></div>
+        <div class="log-head">
+          <span>TASK LOG</span>
+          <div class="log-actions">
+            <span class="last-sync" id="last-sync">never synced</span>
+            <button id="refresh-btn" class="ghost-btn">REFRESH</button>
+            <button id="kiosk-btn" class="ghost-btn">KIOSK</button>
+          </div>
+        </div>
+        <div class="log-table-wrap">
+          <table class="log-table">
+            <thead>
+              <tr>
+                <th class="col-time">TIME</th>
+                <th class="col-status">STATUS</th>
+                <th class="col-worker">WORKER</th>
+                <th class="col-task">TASK</th>
+                <th class="col-summary">SUMMARY</th>
+              </tr>
+            </thead>
+            <tbody id="log-body">
+              <tr class="empty-row"><td colspan="5">Waiting for first sync…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="error-banner" id="error-banner"></div>
+    </main>
+  </body>
+</html>
