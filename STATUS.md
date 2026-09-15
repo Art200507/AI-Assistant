@@ -1,8 +1,8 @@
 # Jarvis — client-side status (2026-09-15)
 
-Everything here lives on this Mac, in `~/JARVIS-local/`, separate from the
-server's own `~/JARVIS/STATUS.md`. Git history in this folder has the full
-diff-by-diff story if you want it.
+Everything here lives on this Mac, in `~/FRIDAY/JARVIS-local/`, separate from
+the server's own `~/JARVIS/STATUS.md`. Git history in this folder has the
+full diff-by-diff story if you want it.
 
 ## Design reference
 
@@ -166,9 +166,9 @@ the flag, per your instruction.
 
 ## Next steps for you
 
-1. Try the voice loop for real: `cd ~/JARVIS-local/voice && source
+1. Try the voice loop for real: `cd ~/FRIDAY/JARVIS-local/voice && source
    ../.venv/bin/activate && python3 jarvis_voice.py`
-2. Try the dashboard: `cd ~/JARVIS-local/dashboard && npm run tauri dev`
+2. Try the dashboard: `cd ~/FRIDAY/JARVIS-local/dashboard && npm run tauri dev`
    (or the kiosk variant — see `dashboard/README.md`)
 3. When ready for the phone layer: sign up for Twilio yourself, fill in
    `phone/.env`, run `ngrok http 5005`, set the webhook, then
