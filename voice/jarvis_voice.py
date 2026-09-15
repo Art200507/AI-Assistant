@@ -9,12 +9,14 @@ the Tauri dashboard's 3D avatar can move in sync (idle/listening/thinking/
 speaking + a real amplitude envelope extracted from the generated speech).
 """
 import os
+import re
 import struct
 import subprocess
 import sys
 import tempfile
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from jarvis_client import ask_jarvis
@@ -45,6 +47,7 @@ PIPER_MODEL = os.environ.get(
 TTS_ENGINE = os.environ.get("JARVIS_TTS_ENGINE", "macos")
 SAY_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")
 SAY_SAMPLE_RATE = 22050
+SAY_RATE = os.environ.get("JARVIS_SAY_RATE", "178")  # words/min; 195 tested too fast, macOS default too sluggish
 
 AUDIO_DEVICE = resolve_audio_device()  # auto-picks the real mic by name; JARVIS_AUDIO_DEVICE overrides
 
@@ -148,7 +151,7 @@ def _synthesize(text: str, out_wav: str):
     else:
         subprocess.run(
             [
-                "say", "-v", SAY_VOICE, "-o", out_wav,
+                "say", "-v", SAY_VOICE, "-r", SAY_RATE, "-o", out_wav,
                 "--file-format=WAVE", f"--data-format=LEI16@{SAY_SAMPLE_RATE}",
                 text,
             ],
@@ -158,25 +161,61 @@ def _synthesize(text: str, out_wav: str):
         )
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_sentences(text: str):
+    parts = [p.strip() for p in _SENTENCE_SPLIT_RE.split(text) if p.strip()]
+    return parts or [text]
+
+
+def _synthesize_to_temp(text: str) -> str:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        path = tmp.name
+    _synthesize(text, path)
+    return path
+
+
+def _play_wav_with_avatar_sync(wav_path: str):
+    envelope = _amplitude_envelope(wav_path)
+    player = subprocess.Popen(["afplay", wav_path])
+    for amp in envelope:
+        if player.poll() is not None:
+            break
+        write_state("speaking", amp)
+        time.sleep(CHUNK_MS / 1000)
+    player.wait(timeout=30)
+
+
 def speak(text: str):
+    """Synthesizes and plays sentence-by-sentence, pipelined: the next
+    sentence is synthesized in the background while the current one plays,
+    instead of waiting for the entire answer to be voiced before any sound
+    plays. For a long answer this is the difference between silence for the
+    whole response and starting to talk almost immediately."""
     if not text:
         write_state("idle", 0.0)
         return
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        out_wav = tmp.name
+
+    sentences = _split_sentences(text)
+    executor = ThreadPoolExecutor(max_workers=1)
     try:
-        _synthesize(text, out_wav)
-        envelope = _amplitude_envelope(out_wav)
-        player = subprocess.Popen(["afplay", out_wav])
-        for amp in envelope:
-            if player.poll() is not None:
-                break
-            write_state("speaking", amp)
-            time.sleep(CHUNK_MS / 1000)
-        player.wait(timeout=30)
+        future = executor.submit(_synthesize_to_temp, sentences[0])
+        for i in range(len(sentences)):
+            wav_path = future.result()
+            next_future = (
+                executor.submit(_synthesize_to_temp, sentences[i + 1])
+                if i + 1 < len(sentences)
+                else None
+            )
+            try:
+                _play_wav_with_avatar_sync(wav_path)
+            finally:
+                Path(wav_path).unlink(missing_ok=True)
+            future = next_future
     finally:
         write_state("idle", 0.0)
-        Path(out_wav).unlink(missing_ok=True)
+        executor.shutdown(wait=False)
 
 
 def run_once():
