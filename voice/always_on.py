@@ -6,11 +6,14 @@ transient well above the recent ambient noise floor). In parallel, a global
 keyboard listener watches for the spacebar being held down for at least
 LONG_PRESS_SECONDS. Either one wakes Jarvis the same way: it speaks a short
 acknowledgment (a rotating pool of dry, polite, JARVIS-flavored lines —
-see _WAKE_ACK_POOL), then listens and buffers real audio until ~1.4s of
-silence (a volume threshold — webrtcvad was tried and measured to perform
-badly on this mic, see the note above SILENCE_RMS), then runs it through
-the same transcribe -> ask_jarvis -> speak pipeline as the push-to-talk
-script (jarvis_voice.py).
+see _WAKE_ACK_POOL), then listens for your actual question. Ending a turn
+is explicit, not guessed from pause length: say "Jarvis" to signal you're
+done, like a radio sign-off. A pause just triggers a checkpoint — whatever
+you've said so far gets transcribed and checked for a trailing "Jarvis";
+if it's not there, recording simply continues no matter how long the pause
+was (a silence-length fallback exists only for when you forget to say it).
+Then runs it through the same ask_jarvis -> speak pipeline as the
+push-to-talk script (jarvis_voice.py).
 
 Clap detection is amplitude/transient-based, not a trained classifier — it
 can be fooled by other sharp sounds (a dropped object, a door) and may need
@@ -21,6 +24,7 @@ your terminal app) since it's a global hotkey, not tied to any window.
 """
 import os
 import random
+import re
 import signal
 import struct
 import subprocess
@@ -98,12 +102,33 @@ def _pick_wake_ack() -> str:
 # doesn't generalize well to this mic's noise floor. Reverted to the RMS
 # threshold, which is measured to actually work on this hardware.
 SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
-# How long a stretch of silence after you've started talking before we
-# decide you're done. Was 800ms (tuned for snappiness) — too aggressive,
-# was cutting off mid-thought pauses. 1400ms gives real room to pause and
-# collect your thoughts without ending the turn.
-SILENCE_HANG_MS = float(os.environ.get("JARVIS_SILENCE_HANG_MS", "1400"))
-MAX_UTTERANCE_S = 20
+
+# Explicit stop word instead of guessing you're "done" from pause length —
+# any fixed silence threshold is wrong for someone half the time: too short
+# and it cuts you off mid-thought, too long and it feels laggy. Say
+# "Jarvis" to end your turn, like a radio sign-off ("...over."). A pause is
+# no longer a hard stop, just a checkpoint: whatever's been said so far
+# gets transcribed and checked for a trailing "Jarvis" — if it's there,
+# that's the real end of the turn (word stripped before it goes anywhere);
+# if not, recording just continues, no matter how long the pause was.
+STOP_WORD = "jarvis"
+CHECKPOINT_SILENCE_MS = float(os.environ.get("JARVIS_CHECKPOINT_SILENCE_MS", "600"))
+# Safety net only, for when you forget to say it or just trail off: end the
+# turn anyway after this much continuous silence, using whatever was
+# transcribed at the last checkpoint.
+STOPWORD_FALLBACK_SILENCE_MS = float(os.environ.get("JARVIS_STOPWORD_FALLBACK_MS", "4000"))
+MAX_UTTERANCE_S = 45  # hard cap regardless — a true safety net, not a normal limit
+
+_STOPWORD_TRAIL_RE = re.compile(r"\bjarvis[.!?,]*\s*$", re.IGNORECASE)
+
+
+def _ends_with_stopword(text: str) -> bool:
+    words = re.findall(r"[a-zA-Z']+", text.lower())
+    return bool(words) and words[-1] == STOP_WORD
+
+
+def _strip_stopword(text: str) -> str:
+    return _STOPWORD_TRAIL_RE.sub("", text).strip()
 
 # Barge-in: if you start talking while Jarvis is mid-sentence, stop
 # immediately instead of finishing the thought. Threshold has to sit above
@@ -131,6 +156,11 @@ def _is_speech(chunk: bytes) -> bool:
 # long spacebar hold again to start a new conversation). This is what lets
 # you keep talking back and forth without re-triggering every turn.
 FOLLOWUP_WAIT_S = float(os.environ.get("JARVIS_FOLLOWUP_WAIT_S", "7"))
+# How long to wait for you to start talking at all right after a fresh
+# wake trigger (clap/spacebar), before the wake acknowledgment). Separate
+# from MAX_UTTERANCE_S, which is now a 45s hard cap on an ongoing
+# utterance, not a "waiting to start" timeout.
+FIRST_TURN_WAIT_S = float(os.environ.get("JARVIS_FIRST_TURN_WAIT_S", "10"))
 
 UTTERANCE_WAV = "/tmp/jarvis_clap_utterance.wav"
 
@@ -264,16 +294,32 @@ def _write_wav(path: str, pcm_bytes: bytes):
 _PREROLL_CHUNKS = 8
 
 
+def _transcribe_buffer(buffer: bytearray) -> str:
+    _write_wav(UTTERANCE_WAV, bytes(buffer))
+    try:
+        return transcribe(UTTERANCE_WAV)
+    finally:
+        Path(UTTERANCE_WAV).unlink(missing_ok=True)
+
+
 def _record_utterance(proc, max_wait_s: float):
-    """Wait up to max_wait_s for you to actually start talking; once you do,
-    record until SILENCE_HANG_MS of continuous VAD-silence (or the
-    MAX_UTTERANCE_S hard cap — a safety net, not the normal stop condition).
-    Returns the raw PCM bytes, or None if nobody spoke within max_wait_s —
-    that's the signal that the conversation is over, not a failed turn."""
+    """Wait up to max_wait_s for you to actually start talking. Once you
+    do, a pause no longer ends the turn by itself — it's just a checkpoint:
+    whatever's been said so far gets transcribed and checked for a
+    trailing "Jarvis". Found it -> that's the real end, word stripped.
+    Not found -> keep recording, no matter how long the pause was, up to
+    STOPWORD_FALLBACK_SILENCE_MS of silence (you forgot to say it) or
+    MAX_UTTERANCE_S (hard cap, a safety net not a normal limit).
+
+    Returns the final transcript (str, possibly empty), or None if nobody
+    spoke at all within max_wait_s — that's "conversation's over", not a
+    failed turn."""
     buffer = bytearray()
     preroll = deque(maxlen=_PREROLL_CHUNKS)
     silence_ms = 0
     heard_voice = False
+    checked_this_pause = False
+    last_text = ""
     start = time.time()
 
     while True:
@@ -295,16 +341,28 @@ def _record_utterance(proc, max_wait_s: float):
             continue
 
         buffer.extend(chunk)
+
         if speech:
             silence_ms = 0
+            checked_this_pause = False
         else:
             silence_ms += CHUNK_MS
-        if silence_ms > SILENCE_HANG_MS:
-            break
-        if (time.time() - start) > MAX_UTTERANCE_S:
-            break
 
-    return bytes(buffer)
+            if not checked_this_pause and silence_ms >= CHECKPOINT_SILENCE_MS:
+                checked_this_pause = True
+                last_text = _transcribe_buffer(buffer)
+                if _ends_with_stopword(last_text):
+                    return _strip_stopword(last_text)
+
+            if silence_ms >= STOPWORD_FALLBACK_SILENCE_MS:
+                return last_text  # gave up waiting for "Jarvis" — use last checkpoint
+
+        if (time.time() - start) > MAX_UTTERANCE_S:
+            if not checked_this_pause:
+                last_text = _transcribe_buffer(buffer)
+            return _strip_stopword(last_text) if _ends_with_stopword(last_text) else last_text
+
+    return last_text or None
 
 
 def _barge_in_monitor(proc, stop_flag: threading.Event, interrupt_event: threading.Event):
@@ -364,22 +422,19 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
             # (not saved), so this picks up an instant after that.
             print("(interrupted — listening)")
             write_state("listening", 0.5)
-            pcm = _record_utterance(proc, BARGE_IN_RECOVERY_WAIT_S)
+            text = _record_utterance(proc, BARGE_IN_RECOVERY_WAIT_S)
         else:
             print("Listening…" if first_turn else "Listening for a follow-up…")
             write_state("listening", 0.5)
-            wait_s = MAX_UTTERANCE_S if first_turn else FOLLOWUP_WAIT_S
-            pcm = _record_utterance(proc, wait_s)
+            wait_s = FIRST_TURN_WAIT_S if first_turn else FOLLOWUP_WAIT_S
+            text = _record_utterance(proc, wait_s)
         first_turn = False
 
-        if pcm is None:
+        if text is None:
             print("--- no follow-up, back to standby ---")
             break
 
-        _write_wav(UTTERANCE_WAV, pcm)
         write_state("thinking", 0.2)
-        text = transcribe(UTTERANCE_WAV)
-        Path(UTTERANCE_WAV).unlink(missing_ok=True)
 
         if not text:
             print("(heard something, couldn't make out words)")
