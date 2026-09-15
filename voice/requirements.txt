@@ -1,2 +1,4 @@
 piper-tts
 pynput
+kokoro-onnx
+soundfile

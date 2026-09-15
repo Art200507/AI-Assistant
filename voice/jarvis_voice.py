@@ -33,21 +33,34 @@ PIPER_MODEL = os.environ.get(
     "PIPER_MODEL", str(HERE / "models" / "piper" / "en_GB-alan-medium.onnx")
 )
 
-# TTS engine: "macos" (default) uses the system `say` command with Daniel
-# (en_GB, male) — the only Daniel actually registered on this Mac; verified
-# via `say -v '?'`. Note: `say -v` on an unrecognized name does NOT error,
-# it silently falls back to the system default voice — which is how a
-# fabricated "Daniel (Enhanced)" ended up playing a female US voice earlier.
-# Always check a voice name is real with `say -v '?' | grep -i <name>`
-# before using it. If you download the genuine enhanced/premium Daniel via
-# System Settings -> Accessibility -> Spoken Content -> System Voice -> (i)
-# -> find Daniel -> Download, it will show up as its own exact line in
-# `say -v '?'` — copy that exact string into JARVIS_SAY_VOICE once it does.
-# Set JARVIS_TTS_ENGINE=piper to use Piper instead.
-TTS_ENGINE = os.environ.get("JARVIS_TTS_ENGINE", "macos")
+# TTS engine: "kokoro" (default) — local open-weights model, noticeably more
+# natural than both Piper and macOS's Daniel. Voice bm_daniel (British male)
+# chosen after comparing all 4 British male voices live. Tradeoff: ~2.8s to
+# synthesize a 4s sentence (vs macOS's near-instant) — the sentence-pipelined
+# playback in speak() hides some of this for multi-sentence answers, but the
+# first sentence's synthesis time is still real, unavoidable latency.
+# "macos" reverts to the free instant option, "piper" to the original.
+TTS_ENGINE = os.environ.get("JARVIS_TTS_ENGINE", "kokoro")
+
 SAY_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")
 SAY_SAMPLE_RATE = 22050
 SAY_RATE = os.environ.get("JARVIS_SAY_RATE", "178")  # words/min; 195 tested too fast, macOS default too sluggish
+
+KOKORO_MODEL = os.environ.get("KOKORO_MODEL", str(HERE / "models" / "kokoro" / "kokoro-v1.0.onnx"))
+KOKORO_VOICES = os.environ.get("KOKORO_VOICES", str(HERE / "models" / "kokoro" / "voices-v1.0.bin"))
+KOKORO_VOICE = os.environ.get("JARVIS_KOKORO_VOICE", "bm_daniel")
+_kokoro = None
+
+
+def _get_kokoro():
+    global _kokoro
+    if _kokoro is None:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from kokoro_onnx import Kokoro
+        _kokoro = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
+    return _kokoro
 
 AUDIO_DEVICE = resolve_audio_device()  # auto-picks the real mic by name; JARVIS_AUDIO_DEVICE overrides
 
@@ -140,7 +153,12 @@ def _amplitude_envelope(wav_path: str, chunk_ms: int = CHUNK_MS):
 
 
 def _synthesize(text: str, out_wav: str):
-    if TTS_ENGINE == "piper":
+    if TTS_ENGINE == "kokoro":
+        import soundfile as sf
+        kokoro = _get_kokoro()
+        samples, sr = kokoro.create(text, voice=KOKORO_VOICE, speed=1.0, lang="en-us")
+        sf.write(out_wav, samples, sr)
+    elif TTS_ENGINE == "piper":
         subprocess.run(
             [PIPER_BIN, "-m", PIPER_MODEL, "-f", out_wav],
             input=text,
