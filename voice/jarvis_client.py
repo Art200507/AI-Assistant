@@ -19,6 +19,9 @@ _SOURCES_BLOCK_RE = re.compile(r"\n{0,2}sources?:.*$", re.IGNORECASE | re.DOTALL
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(https?://[^\)]+\)")
 _BARE_URL_RE = re.compile(r"https?://\S+")
 _BACKTICK_RE = re.compile(r"`([^`]*)`")
+# Groq's model uses markdown emphasis (*word*, **word**) despite being told
+# not to — strip the asterisks/underscores, keep the word.
+_MD_EMPHASIS_RE = re.compile(r"(\*{1,2}|_{1,2})([^*_]+)\1")
 
 
 def _clean(text: str) -> str:
@@ -27,6 +30,7 @@ def _clean(text: str) -> str:
     text = _MD_LINK_RE.sub(r"\1", text)
     text = _BARE_URL_RE.sub("", text)
     text = _BACKTICK_RE.sub(r"\1", text)
+    text = _MD_EMPHASIS_RE.sub(r"\2", text)
     return text.strip()
 
 SSH_HOST = os.environ.get("JARVIS_SSH_HOST", "163.192.207.84")
