@@ -4,6 +4,7 @@ Query text is sent over stdin, never interpolated into a shell command —
 so a misheard transcription can't be interpreted as shell syntax on the
 remote end.
 """
+import json
 import os
 import re
 import subprocess
@@ -41,12 +42,16 @@ REMOTE_JARVIS_DIR = os.environ.get("JARVIS_REMOTE_DIR", "/home/ubuntu/JARVIS")
 # `ollama`, already on the default PATH) work fine — a confusing split.
 REMOTE_EXTRA_PATH = os.environ.get("JARVIS_REMOTE_EXTRA_PATH", "/home/ubuntu/.local/bin")
 
-# Runs jarvis_respond.respond() on the server, reading the query from stdin
-# so we never have to shell-quote arbitrary transcribed text.
+# Runs jarvis_respond.respond() on the server, reading the query (and an
+# optional per-conversation session_id, for real multi-turn memory via
+# claude --resume) from stdin as JSON — never shell-quoting arbitrary
+# transcribed text, and avoiding a second SSH round-trip just to pass two
+# fields.
 _REMOTE_PY = (
-    "import sys; sys.path.insert(0, %r); "
+    "import sys, json; sys.path.insert(0, %r); "
     "import jarvis_respond as jr; "
-    "print(jr.respond(sys.stdin.read().strip()))"
+    "d = json.loads(sys.stdin.read()); "
+    "print(jr.respond(d['query'], session_id=d.get('session_id')))"
 ) % REMOTE_JARVIS_DIR
 
 _REMOTE_CMD = f'export PATH="{REMOTE_EXTRA_PATH}:$PATH"; python3 -c "{_REMOTE_PY}"'
@@ -66,10 +71,17 @@ _SSH_MULTIPLEX_OPTS = [
 ]
 
 
-def ask_jarvis(query_text: str, timeout: int = 90) -> str:
-    """Send query_text to the server's jarvis_respond logic, return its answer."""
+def ask_jarvis(query_text: str, session_id: str = None, timeout: int = 90) -> str:
+    """Send query_text to the server's jarvis_respond logic, return its answer.
+
+    session_id: pass the SAME uuid across every turn of one voice
+    conversation (see always_on.py) so Claude actually remembers earlier
+    turns instead of answering each one in isolation. Omit for a one-off,
+    stateless query (e.g. the push-to-talk script)."""
     if not query_text or not query_text.strip():
         return "I didn't catch anything."
+
+    payload = json.dumps({"query": query_text, "session_id": session_id})
 
     try:
         result = subprocess.run(
@@ -83,7 +95,7 @@ def ask_jarvis(query_text: str, timeout: int = 90) -> str:
                 f"{SSH_USER}@{SSH_HOST}",
                 _REMOTE_CMD,
             ],
-            input=query_text,
+            input=payload,
             capture_output=True,
             text=True,
             timeout=timeout,

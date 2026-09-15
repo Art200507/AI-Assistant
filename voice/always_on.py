@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import wave
 from pathlib import Path
 
@@ -330,6 +331,12 @@ def _handle_wake(proc, trigger: str = "clap"):
     label = "\U0001f44f Clap" if trigger == "clap" else "⌨️  Spacebar held"
     print(f"\n{label} — waking up…")
 
+    # One session_id for this whole conversation (reset on every new wake
+    # trigger) — this is what gives Claude actual memory across follow-up
+    # turns via `claude --resume`, instead of answering each turn in total
+    # isolation. See jarvis_respond.escalate_to_claude on the server.
+    conversation_id = str(uuid.uuid4())
+
     # Acknowledge immediately so you know it's your turn to talk, before we
     # start actually recording the real question. Only said once per
     # conversation, not on every follow-up turn.
@@ -372,7 +379,7 @@ def _handle_wake(proc, trigger: str = "clap"):
             continue  # stay in the conversation, give it another go
 
         print(f"You said: {text}")
-        answer = ask_jarvis(text)
+        answer = ask_jarvis(text, session_id=conversation_id)
         print(f"Jarvis: {answer}")
         interrupted = _speak_interruptible(proc, answer)
         if not interrupted:
