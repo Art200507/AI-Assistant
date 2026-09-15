@@ -7,6 +7,7 @@ remote end.
 import os
 import re
 import subprocess
+from pathlib import Path
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\r")
 
@@ -37,6 +38,20 @@ _REMOTE_PY = (
 
 _REMOTE_CMD = f'export PATH="{REMOTE_EXTRA_PATH}:$PATH"; python3 -c "{_REMOTE_PY}"'
 
+# Reuse one SSH connection across turns instead of paying a full TCP+auth
+# handshake every time (~0.44s cold vs ~0.07s over an existing connection —
+# a real chunk of the "it's so slow" latency was just SSH reconnecting on
+# every single question). ControlPersist keeps the master alive for 10
+# minutes of inactivity so a whole back-and-forth conversation rides one
+# connection.
+_SSH_CM_DIR = Path.home() / ".ssh" / "cm"
+_SSH_CM_DIR.mkdir(parents=True, exist_ok=True)
+_SSH_MULTIPLEX_OPTS = [
+    "-o", "ControlMaster=auto",
+    "-o", f"ControlPath={_SSH_CM_DIR}/%r@%h:%p",
+    "-o", "ControlPersist=600",
+]
+
 
 def ask_jarvis(query_text: str, timeout: int = 90) -> str:
     """Send query_text to the server's jarvis_respond logic, return its answer."""
@@ -51,6 +66,7 @@ def ask_jarvis(query_text: str, timeout: int = 90) -> str:
                 "-o", "ConnectTimeout=8",
                 "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new",
+                *_SSH_MULTIPLEX_OPTS,
                 f"{SSH_USER}@{SSH_HOST}",
                 _REMOTE_CMD,
             ],

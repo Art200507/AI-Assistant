@@ -52,12 +52,12 @@ LONG_PRESS_SECONDS = float(os.environ.get("JARVIS_LONG_PRESS_SECONDS", "0.6"))
 
 # What Jarvis says the instant it wakes, before it starts actually listening
 # for your real question — gives you an audible cue that it's your turn to
-# talk. Rotates through a small pool so it doesn't feel like a canned
-# robotic line; mostly plain and dry, with the odd tiny joke or compliment
-# mixed in rarely (about 1 in 10), matching the persona in the actual
-# answers (see jarvis_respond.py on the server). Set JARVIS_WAKE_ACK to pin
-# a single fixed phrase instead.
-_WAKE_ACK_POOL = [
+# talk. This now only plays once per conversation (not every follow-up
+# turn), so exposure to it is already much lower than before. On top of
+# that, the joke/compliment lines are picked with low explicit probability
+# rather than uniformly, so they land roughly once every ~20 conversations,
+# not once every ~10 turns. Set JARVIS_WAKE_ACK to pin a single fixed phrase.
+_WAKE_ACK_PLAIN = [
     "At your service, sir.",
     "Yes, sir? I'm listening.",
     "Go ahead, sir.",
@@ -66,21 +66,34 @@ _WAKE_ACK_POOL = [
     "Do go on, sir.",
     "I'm listening, sir.",
     "Yes, sir?",
-    "Ah, back so soon. Go on, sir.",  # tiny dry joke, rare
-    "Always a pleasure, sir. What can I do for you?",  # compliment, rare
 ]
+_WAKE_ACK_RARE = [
+    "Ah, back so soon. Go on, sir.",  # tiny dry joke
+    "Always a pleasure, sir. What can I do for you?",  # compliment
+]
+_WAKE_ACK_RARE_PROBABILITY = 0.05
 
 
 def _pick_wake_ack() -> str:
     fixed = os.environ.get("JARVIS_WAKE_ACK")
     if fixed:
         return fixed
-    return random.choice(_WAKE_ACK_POOL)
+    if random.random() < _WAKE_ACK_RARE_PROBABILITY:
+        return random.choice(_WAKE_ACK_RARE)
+    return random.choice(_WAKE_ACK_PLAIN)
 
-# Endpointing for the actual query after a wake trigger.
+# Endpointing for the actual query after a wake trigger. Trimmed from 1000ms
+# to 800ms for snappier turn-taking — raise JARVIS_SILENCE_HANG_MS back up
+# if it's cutting you off mid-thought.
 SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
-SILENCE_HANG_MS = 1000
+SILENCE_HANG_MS = float(os.environ.get("JARVIS_SILENCE_HANG_MS", "800"))
 MAX_UTTERANCE_S = 12
+
+# After Jarvis finishes speaking, how long it keeps listening for a
+# follow-up before quietly giving up and going back to standby (clap /
+# long spacebar hold again to start a new conversation). This is what lets
+# you keep talking back and forth without re-triggering every turn.
+FOLLOWUP_WAIT_S = float(os.environ.get("JARVIS_FOLLOWUP_WAIT_S", "7"))
 
 UTTERANCE_WAV = "/tmp/jarvis_clap_utterance.wav"
 
@@ -204,18 +217,11 @@ def _write_wav(path: str, pcm_bytes: bytes):
         wf.writeframes(pcm_bytes)
 
 
-def _handle_wake(proc, trigger: str = "clap"):
-    label = "\U0001f44f Clap" if trigger == "clap" else "⌨️  Spacebar held"
-    print(f"\n{label} — waking up…")
-
-    # Acknowledge immediately so you know it's your turn to talk, before we
-    # start actually recording the real question.
-    write_state("speaking", 0.6)
-    speak(_pick_wake_ack())
-    _drain_backlog(proc)  # discard mic input captured while the ack played
-
-    print("Listening…")
-    write_state("listening", 0.5)
+def _record_utterance(proc, max_wait_s: float):
+    """Wait up to max_wait_s for you to actually start talking; once you do,
+    record until ~1s of trailing silence (or the MAX_UTTERANCE_S hard cap).
+    Returns the raw PCM bytes, or None if nobody spoke within max_wait_s —
+    that's the signal that the conversation is over, not a failed turn."""
     buffer = bytearray()
     silence_ms = 0
     heard_voice = False
@@ -225,35 +231,72 @@ def _handle_wake(proc, trigger: str = "clap"):
         chunk = _read_exact(proc.stdout, CHUNK_BYTES)
         if not chunk:
             break
-        buffer.extend(chunk)
         level = _rms(chunk)
+
+        if not heard_voice:
+            if level > SILENCE_RMS:
+                heard_voice = True
+                buffer.extend(chunk)
+            elif (time.time() - start) > max_wait_s:
+                return None  # gave up waiting — nobody spoke, not an error
+            continue
+
+        buffer.extend(chunk)
         if level > SILENCE_RMS:
             silence_ms = 0
-            heard_voice = True
         else:
             silence_ms += CHUNK_MS
-        if heard_voice and silence_ms > SILENCE_HANG_MS:
+        if silence_ms > SILENCE_HANG_MS:
             break
         if (time.time() - start) > MAX_UTTERANCE_S:
             break
 
-    _write_wav(UTTERANCE_WAV, bytes(buffer))
-    write_state("thinking", 0.2)
-    text = transcribe(UTTERANCE_WAV)
-    Path(UTTERANCE_WAV).unlink(missing_ok=True)
+    return bytes(buffer)
 
-    if not text:
-        print("(heard nothing usable)")
-        speak("I'm afraid I didn't quite catch that, sir.")
-    else:
+
+def _handle_wake(proc, trigger: str = "clap"):
+    label = "\U0001f44f Clap" if trigger == "clap" else "⌨️  Spacebar held"
+    print(f"\n{label} — waking up…")
+
+    # Acknowledge immediately so you know it's your turn to talk, before we
+    # start actually recording the real question. Only said once per
+    # conversation, not on every follow-up turn.
+    write_state("speaking", 0.6)
+    speak(_pick_wake_ack())
+    _drain_backlog(proc)  # discard mic input captured while the ack played
+
+    first_turn = True
+    while True:
+        print("Listening…" if first_turn else "Listening for a follow-up…")
+        write_state("listening", 0.5)
+        wait_s = MAX_UTTERANCE_S if first_turn else FOLLOWUP_WAIT_S
+        pcm = _record_utterance(proc, wait_s)
+        first_turn = False
+
+        if pcm is None:
+            print("--- no follow-up, back to standby ---")
+            break
+
+        _write_wav(UTTERANCE_WAV, pcm)
+        write_state("thinking", 0.2)
+        text = transcribe(UTTERANCE_WAV)
+        Path(UTTERANCE_WAV).unlink(missing_ok=True)
+
+        if not text:
+            print("(heard something, couldn't make out words)")
+            speak("Sorry, I didn't quite catch that, sir.")
+            _drain_backlog(proc)
+            continue  # stay in the conversation, give it another go
+
         print(f"You said: {text}")
         answer = ask_jarvis(text)
         print(f"Jarvis: {answer}")
         speak(answer)
+        _drain_backlog(proc)
+        # loop straight back into listening — no re-trigger needed for a
+        # follow-up, this is what makes it feel like an actual conversation
 
     write_state("idle", 0.0)
-    _drain_backlog(proc)
-    print("--- listening for the next clap ---")
 
 
 def _sanity_check(proc, seconds: float = 1.0):
