@@ -102,9 +102,8 @@ No keypress needed to start a turn:
   to grant your terminal app Accessibility permission the first time
   (System Settings → Privacy & Security → Accessibility).
 - **Either trigger** leads to the same flow: Jarvis speaks a short
-  acknowledgment ("Yes? What's up?", configurable via `JARVIS_WAKE_ACK`) so
-  you know it's your turn, *then* starts recording your actual question,
-  stopping on ~1s of silence, then the normal transcribe → ask → speak path.
+  acknowledgment, *then* starts recording your actual question, stopping on
+  ~1s of silence, then the normal transcribe → ask → speak path.
 - Startup runs a **mic sanity check** (prints avg/peak signal level) and
   warns explicitly if the stream looks silent, rather than just hanging
   forever waiting for a clap that can never register. This is what caught
@@ -113,6 +112,41 @@ No keypress needed to start a turn:
   `ffmpeg` process, which could hold the mic device and starve the *next*
   run of audio entirely — added explicit SIGINT/SIGTERM handlers plus a
   terminate-then-kill fallback; verified clean process exit on interrupt.
+
+### Personality — dry, witty, flawlessly polite British, rarely a tiny joke
+
+Two pieces, both tested:
+- **Wake acknowledgment** (`always_on.py`, `_WAKE_ACK_POOL`): rotates
+  through ~10 short JARVIS-flavored lines ("At your service, sir.", "Go
+  ahead, sir.", etc.) instead of one fixed robotic phrase. Two of the ten
+  are a tiny dry joke and an understated compliment respectively, so they
+  surface roughly 1-in-10 draws each — "rarely," not every turn. Pin a
+  single fixed phrase instead with `JARVIS_WAKE_ACK`.
+- **Actual answers**: this is the one place tonight I touched a file on
+  the *server*, not just this Mac — flagging that clearly since the server
+  side is technically another session's territory. `jarvis_respond.py`'s
+  `escalate_to_claude()` (the path real reasoning questions take) previously
+  called `claude -p <your question>` with zero persona — just bare Claude.
+  It now prepends a persona instruction (dry, understated British wit, rare
+  small jokes, rare genuine compliments, addresses you as "sir", plain
+  spoken prose since it's read aloud — no markdown/lists unless you
+  explicitly ask for code). The `answer_lookup()` path (small local Ollama
+  model, task-log questions) got a much lighter touch — politer tone only,
+  deliberately no jokes, since a 3B model asked to be witty *and* factually
+  accurate about your task log tends to just become inaccurate. Change is
+  isolated to those two functions; `classify()`, the orchestrator, and
+  everything the other session built are untouched. Verified live: a
+  reasoning question got a genuinely well-observed, in-character answer
+  addressed "sir"; the lookup path still answers plainly (when the small
+  model isn't just being flaky, see below).
+- **Known pre-existing quirk, not something I broke**: the lookup path's
+  answers are inconsistent run-to-run — asked "how many tasks are done"
+  three times in a row tonight and got three different phrasings, one of
+  them briefly claiming no tasks existed at all before self-correcting on
+  retry. That's `llama3.2:3b`'s inherent unreliability at exact fact
+  retrieval, not a regression from tonight's changes (confirmed by testing
+  before and after). If this bothers you, the fix is a better lookup model
+  or grounding the prompt more strictly — say the word and I'll take a pass.
 
 ## 3. Phone layer (`phone/`) — scaffolded only, inert by design
 
