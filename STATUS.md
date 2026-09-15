@@ -649,4 +649,49 @@ this to scale to "fix this whole project," that's a bigger scope — say so
 and we'll design that properly rather than stretching this in an ad hoc
 way.
 
+**Update, round eleven — "just do everything we talked about."** Couldn't
+literally do everything (a real chunk of the brainstorm — Canvas/LMS, Anki,
+Obsidian, smart home — needs facts or credentials only the user has: which
+LMS, whether they even use those tools, an actual vault/API location. Built
+what was genuinely ready with zero new input needed.
+
+**Google Calendar — wired in, confirmed genuinely working, not assumed.**
+`claude mcp list` on the server already showed Slack/Gmail/Calendar/Indeed
+as connected (tied to the user's own claude.ai account — nothing I set up).
+Didn't trust "connected" at face value given the hallucination bugs found
+two rounds ago — traced the actual tool-use events
+(`--output-format=stream-json`) and confirmed a real
+`mcp__claude_ai_Google_Calendar__list_events` call returned real Google API
+data (the account's real email as calendar owner, real timezone). Full CRUD
+included (create/update/delete/respond) — worth knowing delete_event is
+in there, it can remove a real event if asked to.
+
+**Found and fixed a real, subtle behavioral bug along the way**: adding
+`Bash` to `--allowedTools` alongside the calendar MCP tool made Claude stop
+bothering to even try `ToolSearch` to discover it — it would just say "I
+don't have calendar access" without attempting the tool at all. Worked
+fine with a short, calendar-only tool list; broke the instant Bash joined
+the list. Fixed by explicitly telling it in the system prompt that these
+specific MCP tools exist and to check for them before ever claiming no
+access — confirmed fixed through the *actual* pipeline (`jarvis_client.py`,
+full tool list, full persona), not just an isolated retest.
+
+**Gmail — wired in, but not functional yet, and that's on the user, not
+code.** The live trace showed `"connector isn't authorized with the
+necessary scope yet"` — needs reauthorizing in claude.ai connector
+settings (their click, not scriptable from here). Deliberately read-only
+in the allowed list (search/get threads & messages, list labels/drafts) —
+no send/reply/forward. That split was flagged as needing its own explicit
+decision in the last brainstorm and hasn't been revisited since, so it
+stayed conservative. Verified the persona correctly refuses a send
+request ("I'm unable to send emails") rather than attempting or
+hallucinating success.
+
+**Still needs the user for the rest of the brainstorm**: which LMS
+(Canvas/Blackboard/other) + personal access token, whether they use
+Obsidian and where the vault lives, whether Anki/Zotero are part of their
+workflow, whether they have any smart home devices at all. None of these
+can be guessed correctly — wrong guesses here mean wasted building, not
+just wasted asking.
+
 — built overnight by Claude, 2026-09-15
