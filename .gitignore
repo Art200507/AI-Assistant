@@ -22,3 +22,6 @@ phone/.env
 
 # Audio artifacts
 *.wav
+
+# Runtime logs
+os-bridge/actions.log

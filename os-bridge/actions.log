@@ -1,3 +1,0 @@
-[2026-09-15 03:15:40] SAFE_MODE (not run): open_app — open -a "Calculator"
-[2026-09-15 03:15:40] SAFE_MODE (not run): set_volume — osascript -e 'set volume output volume 50'
-[2026-09-15 03:15:40] SAFE_MODE (not run): clear_cache — sudo purge  (reclaims inactive RAM, touches no files)
