@@ -151,6 +151,25 @@ _FILE_FIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Explicit manual override for which tier answers, instead of leaving it to
+# classify(). Added because auto-routing between two genuinely different
+# models sharing one "Jarvis" identity produces a jarring effect: each tier
+# is honest about itself individually, but that means Jarvis can seem to
+# contradict its own earlier claims mid-conversation whenever the tier
+# switches unpredictably. Explicit control means you always know which one
+# you're talking to. Resets to off at the start of every new conversation
+# (new wake trigger) — deliberately not sticky across separate claps, so
+# you can't accidentally leave it on and forget.
+_ACTIVATE_CLAUDE_RE = re.compile(
+    r"\b(activate claude|switch to claude|use claude( code)?|talk to claude)\b",
+    re.IGNORECASE,
+)
+_DEACTIVATE_CLAUDE_RE = re.compile(
+    r"\b(deactivate claude|switch back|back to (normal|fast)( mode)?|"
+    r"stop using claude|exit claude( mode)?)\b",
+    re.IGNORECASE,
+)
+
 # Barge-in: if you start talking while Jarvis is mid-sentence, stop
 # immediately instead of finishing the thought. Threshold has to sit above
 # whatever Jarvis's own voice measures as, leaking from the speakers back
@@ -435,6 +454,7 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
         _drain_backlog(proc)  # discard mic input captured while the ack played
 
     first_turn = True
+    claude_mode = False
     while True:
         if interrupted:
             # You talked over Jarvis — it already stopped, now catch the
@@ -465,12 +485,28 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
             continue  # stay in the conversation, give it another go
 
         print(f"You said: {text}")
+
+        if _ACTIVATE_CLAUDE_RE.search(text):
+            claude_mode = True
+            print("(claude mode: ON — every turn now forced to the reasoning tier)")
+            interrupted = _speak_interruptible(proc, "Claude's active, sir. Every turn now goes there until you switch back.")
+            if not interrupted:
+                _drain_backlog(proc)
+            continue  # control command, not a question — don't send it anywhere
+        if _DEACTIVATE_CLAUDE_RE.search(text):
+            claude_mode = False
+            print("(claude mode: OFF — back to normal routing)")
+            interrupted = _speak_interruptible(proc, "Back to normal, sir.")
+            if not interrupted:
+                _drain_backlog(proc)
+            continue
+
         if _FILE_FIX_RE.search(text):
             print("(local intent: checking inbox for a file to fix)")
             write_state("thinking", 0.4)
             answer = fix_file(latest_inbox_file(), session_id=conversation_id)
         else:
-            answer = ask_jarvis(text, session_id=conversation_id)
+            answer = ask_jarvis(text, session_id=conversation_id, force_reasoning=claude_mode)
         print(f"Jarvis: {answer}")
         interrupted = _speak_interruptible(proc, answer)
         if not interrupted:

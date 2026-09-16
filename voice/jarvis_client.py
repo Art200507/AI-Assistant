@@ -55,7 +55,8 @@ _REMOTE_PY = (
     "import sys, json; sys.path.insert(0, %r); "
     "import jarvis_respond as jr; "
     "d = json.loads(sys.stdin.read()); "
-    "print(jr.respond(d['query'], session_id=d.get('session_id')))"
+    "print(jr.respond(d['query'], session_id=d.get('session_id'), "
+    "force_reasoning=d.get('force_reasoning', False)))"
 ) % REMOTE_JARVIS_DIR
 
 _REMOTE_CMD = f'export PATH="{REMOTE_EXTRA_PATH}:$PATH"; python3 -c "{_REMOTE_PY}"'
@@ -75,17 +76,21 @@ _SSH_MULTIPLEX_OPTS = [
 ]
 
 
-def ask_jarvis(query_text: str, session_id: str = None, timeout: int = 90) -> str:
+def ask_jarvis(query_text: str, session_id: str = None, force_reasoning: bool = False, timeout: int = 90) -> str:
     """Send query_text to the server's jarvis_respond logic, return its answer.
 
     session_id: pass the SAME uuid across every turn of one voice
     conversation (see always_on.py) so Claude actually remembers earlier
     turns instead of answering each one in isolation. Omit for a one-off,
-    stateless query (e.g. the push-to-talk script)."""
+    stateless query (e.g. the push-to-talk script).
+
+    force_reasoning: skip classify() and go straight to Claude — the
+    manual "activate claude" override in always_on.py, so you always know
+    which model you're talking to instead of it silently switching."""
     if not query_text or not query_text.strip():
         return "I didn't catch anything."
 
-    payload = json.dumps({"query": query_text, "session_id": session_id})
+    payload = json.dumps({"query": query_text, "session_id": session_id, "force_reasoning": force_reasoning})
 
     try:
         result = subprocess.run(
