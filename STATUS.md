@@ -735,4 +735,38 @@ Groq's identity fixed at the source, TTS switched for speed.**
   `say` both still available via `JARVIS_TTS_ENGINE` if quality ever
   matters more than speed again.
 
+**Update, round thirteen — stop-word reliability, speaking rate, Groq web
+search scaffolded.**
+
+- **Piper speaking rate**: still felt slow after the engine switch.
+  Wired in `--length-scale` (Piper's rate control, lower = faster),
+  started at 0.85 (~15% faster than default) — deliberately conservative
+  given the macOS `say` rate calibration earlier tonight taught the same
+  lesson (195wpm was too fast, better to undershoot and get feedback than
+  overshoot). `JARVIS_PIPER_LENGTH_SCALE` if it needs further tuning.
+- **Stop-word reliability, fixed with real data**: Whisper (base.en)
+  doesn't reliably transcribe "Jarvis" — confirmed from actual use, not
+  guessed. Real observed mishearings in one short session: "Chavez",
+  "Jorvis", "Javis". Two complementary fixes: (1) `STOP_WORD_VARIANTS` now
+  accepts these actual mishearings as equivalent triggers instead of
+  requiring exact spelling — the point is detecting intent, not exact
+  transcription; (2) added `--prompt` biasing to the Whisper call itself
+  ("Jarvis, are you there? Yes, Jarvis. Thank you, Jarvis.") to nudge
+  recognition toward the word in the first place. Sanity-checked against
+  the bundled JFK sample to confirm normal transcription wasn't degraded.
+- **Groq web search — built, tested for regressions, dormant pending a
+  key.** Groq had zero tools (pure text completion), which is why "give
+  me a news rundown" got an honest "I don't have access" instead of an
+  answer. Real fix needs a search API Groq can call — asked the user
+  which service rather than assuming a free tier is still good (Gemini's
+  "free tier" needing paid credits was a recent lesson in not assuming).
+  Chose Tavily. Implemented real OpenAI-style tool-calling for Groq
+  (`GROQ_TOOLS`, a 3-round tool-call loop, `tavily_search()`) — same
+  ready-but-inert pattern as every other key in this system:
+  `TAVILY_API_KEY` not present yet, so `tools` is simply omitted from the
+  Groq payload and behavior is byte-for-byte what it was before. Verified
+  through the real pipeline that normal Groq responses are unaffected
+  (multiple timed runs, consistent ~0.7-1.5s, matching pre-change numbers)
+  before considering this safe to leave deployed while waiting on the key.
+
 — built overnight by Claude, 2026-09-15
