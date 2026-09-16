@@ -769,4 +769,56 @@ search scaffolded.**
   (multiple timed runs, consistent ~0.7-1.5s, matching pre-change numbers)
   before considering this safe to leave deployed while waiting on the key.
 
+**Update, round fourteen — the identity flip-flopping, actually
+diagnosed and fixed (not routed around this time).**
+
+User pasted a real transcript where Jarvis alternated between "I'm
+running on Groq" and "I'm actually Claude Sonnet 5, that Groq claim was
+wrong" mid-conversation. Traced the real cause: the shared cross-tier
+memory built a few rounds ago (so Groq and Claude turns stay coherent)
+means Claude sometimes reads back an earlier turn where Groq honestly
+self-identified — and Claude, correctly from its own perspective, treats
+that as an error and "corrects" it. Both tiers were being 100% honest
+individually; the problem was architectural, not a hallucination this
+time.
+
+Two real fixes, both verified through the actual pipeline:
+
+1. **`SIBLING_AWARENESS`** — both tiers now explicitly told they're two
+   tiers of the same Jarvis, sharing memory, and that seeing the other
+   self-identify in history is expected, not an error to fix. User's own
+   framing for this ("brothers, same family, different jobs") is close to
+   verbatim in the actual prompt text. Verified: asked Claude directly "do
+   you remember what I asked before, are you the same assistant" after an
+   earlier Groq turn — it correctly recalled the Groq answer and explained
+   the tier switch naturally: *"Same Jarvis, same memory, different engine
+   under the hood, sir."* No correction, no confusion.
+2. **Split the shared persona by tier** — found a second real bug while
+   fixing the first: the old single shared persona included Claude's
+   Calendar/Gmail MCP tool instructions, sent to Groq too, which doesn't
+   have those tools at all — and Groq had been confabulating having them
+   ("I can retrieve your Calendar and Gmail...", "loading tools for
+   calendar, Gmail, and file access" — both real quotes from the pasted
+   transcript). Split into `CLAUDE_CAPABILITIES` (the real tool list) and
+   `GROQ_CAPABILITIES` (explicit: no calendar/email/file/Bash access, say
+   so plainly). Verified: Groq now says "I do not have access to
+   calendars, email, files, or live systems" instead of claiming it does.
+
+**Also added — "activate Claude" / "switch back" voice commands.**
+Explicit manual override instead of leaving tier selection entirely to a
+sometimes-unpredictable classifier: say "activate Claude" and every turn
+is forced to the reasoning tier (skips classify() entirely) until you say
+"switch back" or start a new conversation (resets automatically on each
+new wake trigger — not sticky forever, so you can't accidentally leave it
+on without realizing). Threaded `force_reasoning` through
+`jarvis_client.ask_jarvis()` -> the SSH JSON payload ->
+`jarvis_respond.respond()`.
+
+**Clarified for the user**: the 15-second "news rundown" that triggered
+this whole investigation was Claude's real WebSearch (already built in,
+already working) — not Groq+Tavily, since the Tavily key hadn't been
+provided yet at that point. Once Tavily's wired in and confirmed working,
+simple lookup-style web questions could move to the faster Groq+Tavily
+path instead of always needing Claude's slower one.
+
 — built overnight by Claude, 2026-09-15
