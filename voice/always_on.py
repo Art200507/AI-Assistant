@@ -113,6 +113,13 @@ SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
 # that's the real end of the turn (word stripped before it goes anywhere);
 # if not, recording just continues, no matter how long the pause was.
 STOP_WORD = "jarvis"
+# Whisper (base.en) doesn't reliably transcribe "Jarvis" — confirmed from
+# real use, not guessed: it came back as "Chavez" and "Jorvis" in the same
+# short session. Rather than pick a whole new trigger word, accept the
+# actual observed mishearings as equivalent — a phonetic match is still a
+# correct match here, the point is detecting intent, not exact spelling.
+# Add more here the moment a new mishearing shows up.
+STOP_WORD_VARIANTS = {"jarvis", "chavez", "jorvis", "javis", "jarviss", "charvis", "travis"}
 CHECKPOINT_SILENCE_MS = float(os.environ.get("JARVIS_CHECKPOINT_SILENCE_MS", "600"))
 # Safety net only, for when you forget to say it or just trail off: end the
 # turn anyway after this much continuous silence, using whatever was
@@ -120,12 +127,14 @@ CHECKPOINT_SILENCE_MS = float(os.environ.get("JARVIS_CHECKPOINT_SILENCE_MS", "60
 STOPWORD_FALLBACK_SILENCE_MS = float(os.environ.get("JARVIS_STOPWORD_FALLBACK_MS", "4000"))
 MAX_UTTERANCE_S = 45  # hard cap regardless — a true safety net, not a normal limit
 
-_STOPWORD_TRAIL_RE = re.compile(r"\bjarvis[.!?,]*\s*$", re.IGNORECASE)
+_STOPWORD_TRAIL_RE = re.compile(
+    r"\b(" + "|".join(STOP_WORD_VARIANTS) + r")[.!?,]*\s*$", re.IGNORECASE
+)
 
 
 def _ends_with_stopword(text: str) -> bool:
     words = re.findall(r"[a-zA-Z']+", text.lower())
-    return bool(words) and words[-1] == STOP_WORD
+    return bool(words) and words[-1] in STOP_WORD_VARIANTS
 
 
 def _strip_stopword(text: str) -> str:

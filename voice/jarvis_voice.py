@@ -123,10 +123,16 @@ def record_until_enter(out_wav: str):
         proc.wait(timeout=5)
 
 
+WHISPER_PROMPT = os.environ.get(
+    "JARVIS_WHISPER_PROMPT",
+    "Jarvis, are you there? Yes, Jarvis. Thank you, Jarvis.",
+)
+
+
 def transcribe(wav_path: str) -> str:
     write_state("thinking", 0.2)
     result = subprocess.run(
-        [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav_path, "-nt", "-np"],
+        [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav_path, "-nt", "-np", "--prompt", WHISPER_PROMPT],
         capture_output=True,
         text=True,
         timeout=60,
