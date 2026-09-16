@@ -32,6 +32,12 @@ PIPER_BIN = os.environ.get("PIPER_BIN", str(HERE.parent / ".venv" / "bin" / "pip
 PIPER_MODEL = os.environ.get(
     "PIPER_MODEL", str(HERE / "models" / "piper" / "en_GB-alan-medium.onnx")
 )
+# Piper's rate control: lower = faster (scales phoneme duration), 1.0 = the
+# model's natural default. Started at 0.85 (moderate speedup) rather than
+# jumping straight to the fastest tested value — same lesson as the macOS
+# say rate earlier tonight (195wpm was too fast, 178 was right); better to
+# undershoot first and get feedback than overshoot.
+PIPER_LENGTH_SCALE = os.environ.get("JARVIS_PIPER_LENGTH_SCALE", "0.85")
 
 # TTS engine: "piper" (default) — measured ~0.72s synthesis for a short
 # sentence, vs Kokoro's ~2.73s (same sentence, same machine) and macOS
@@ -162,7 +168,7 @@ def _synthesize(text: str, out_wav: str):
         sf.write(out_wav, samples, sr)
     elif TTS_ENGINE == "piper":
         subprocess.run(
-            [PIPER_BIN, "-m", PIPER_MODEL, "-f", out_wav],
+            [PIPER_BIN, "-m", PIPER_MODEL, "--length-scale", PIPER_LENGTH_SCALE, "-f", out_wav],
             input=text,
             text=True,
             capture_output=True,
