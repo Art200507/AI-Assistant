@@ -33,14 +33,16 @@ PIPER_MODEL = os.environ.get(
     "PIPER_MODEL", str(HERE / "models" / "piper" / "en_GB-alan-medium.onnx")
 )
 
-# TTS engine: "kokoro" (default) — local open-weights model, noticeably more
-# natural than both Piper and macOS's Daniel. Voice bm_daniel (British male)
-# chosen after comparing all 4 British male voices live. Tradeoff: ~2.8s to
-# synthesize a 4s sentence (vs macOS's near-instant) — the sentence-pipelined
-# playback in speak() hides some of this for multi-sentence answers, but the
-# first sentence's synthesis time is still real, unavoidable latency.
-# "macos" reverts to the free instant option, "piper" to the original.
-TTS_ENGINE = os.environ.get("JARVIS_TTS_ENGINE", "kokoro")
+# TTS engine: "piper" (default) — measured ~0.72s synthesis for a short
+# sentence, vs Kokoro's ~2.73s (same sentence, same machine) and macOS
+# say's ~0.5s. Switched from Kokoro after the user chose speed given the
+# Groq-heavy fast conversation style: Kokoro alone was adding ~2.5s to
+# every single turn, on top of the ~2.3s Whisper+SSH+classify+Groq floor.
+# Real total turn time (silence -> first sound) measured at ~5-5.5s on
+# Kokoro; expected ~2.9s on Piper given the same breakdown. "kokoro" is
+# still available (best quality, if speed stops mattering), "macos" is the
+# free instant fallback with the least natural voice.
+TTS_ENGINE = os.environ.get("JARVIS_TTS_ENGINE", "piper")
 
 SAY_VOICE = os.environ.get("JARVIS_SAY_VOICE", "Daniel")
 SAY_SAMPLE_RATE = 22050
