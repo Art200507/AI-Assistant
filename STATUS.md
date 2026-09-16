@@ -694,4 +694,45 @@ workflow, whether they have any smart home devices at all. None of these
 can be guessed correctly — wrong guesses here mean wasted building, not
 just wasted asking.
 
+**Update, round twelve (2026-09-16) — Claude's OAuth session expired,
+Groq's identity fixed at the source, TTS switched for speed.**
+
+- **Claude's server-side login expired overnight** — `Failed to authenticate:
+  OAuth session expired and could not be refreshed`. Not caused by anything
+  built here; the CLI's own session just logged out, breaking every
+  `escalate_to_claude()` call. Re-authenticated via `claude auth login
+  --claudeai` (explicitly NOT `--console`, which would silently switch to
+  paid API billing — the thing guarded against since the very start of this
+  project). Confirmed after: `authMethod: "claude.ai"`, `subscriptionType:
+  "pro"`, no `ANTHROPIC_API_KEY` in the environment. Broke in under 24
+  hours of prior working use, which is unusually fast for a normal
+  expiration — flagged to the user as worth watching for a recurring
+  pattern, not something I could fully diagnose from here (it's Anthropic-
+  side token refresh behavior).
+- **Fixed Groq's identity hallucination at the source instead of routing
+  around it.** Two rounds ago, "what model are you" got hard-routed to
+  Claude because Groq lied about being "OpenAI's GPT-4." User's explicit
+  instruction this round: Groq should handle everything reasonably
+  possible, Claude only for genuinely complex tasks — so routing identity
+  questions away from Groq now works against the actual goal. Real fix:
+  told Groq the truth explicitly in its system prompt ("you are running on
+  Groq's cloud infrastructure, using openai/gpt-oss-20b — say exactly
+  that"). Tested directly against the raw API first, then through the full
+  pipeline: now answers honestly and fast (1.5-2.4s, not routed to
+  Claude's slower path). Removed the now-dead `_IDENTITY_RE` hard-route.
+- **TTS switched from Kokoro to Piper for speed** — measured real
+  component-level latency rather than guessing: Whisper transcription
+  ~0.75s, SSH+classify+Groq ~1.5-2.4s, Kokoro synthesis ~2.73s even for a
+  short sentence (fixed per-call cost, not length-proportional) — total
+  ~5-5.5s per turn. That's the actual floor with Kokoro; user wanted
+  faster given the fast-Groq conversation style now in place. Measured
+  Piper (already installed, was the original TTS before Kokoro, never
+  actually got live user feedback on its quality) at ~0.72s — nearly 4x
+  faster, cutting the expected total to ~2.9s. User's explicit choice
+  after seeing the real numbers side by side (say ~0.5s/basic quality,
+  Piper ~0.72s/decent quality, Kokoro ~2.73s/best quality, ElevenLabs
+  would only add network latency — no speed win at all). Kokoro and macOS
+  `say` both still available via `JARVIS_TTS_ENGINE` if quality ever
+  matters more than speed again.
+
 — built overnight by Claude, 2026-09-15
