@@ -17,9 +17,25 @@ import json
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from jarvis_client import ask_jarvis, SSH_KEY, SSH_USER, SSH_HOST, _SSH_MULTIPLEX_OPTS
+
+# Same transport-failure strings ask_jarvis() can return in place of a real
+# answer (see jarvis_client.ask_jarvis) — learning.py checks for these before
+# treating a reply as real content; fix_file() needs the same guard, since
+# treating "The server didn't respond in time." as a bug-fix summary would
+# mean downloading whatever happens to be sitting at the output path next.
+_ASK_JARVIS_FAILURE_PREFIXES = (
+    "The server didn't respond in time.",
+    "I couldn't reach the server:",
+    "Something went wrong on the server side:",
+)
+
+
+def _is_transport_failure(summary: str) -> bool:
+    return any(summary.startswith(p) for p in _ASK_JARVIS_FAILURE_PREFIXES)
 
 HERE = Path(__file__).parent
 INBOX_DIR = HERE.parent / "inbox"
@@ -87,14 +103,22 @@ def fix_file(local_path, session_id=None) -> str:
     backup_path = BACKUPS_DIR / f"{local_path.stem}.{int(time.time())}{local_path.suffix}"
     shutil.copy2(local_path, backup_path)
 
-    remote_incoming = f"{REMOTE_INCOMING}/{local_path.name}"
-    remote_fixed = f"{REMOTE_FIXED}/{local_path.name}"
+    # Job-scoped remote directory, not a fixed filename-only path. A fixed
+    # path meant a failed/timed-out run could leave the *previous* run's
+    # output sitting there, and a later call for the same filename would
+    # scp it down and silently overwrite local_path with stale content —
+    # reproduced by audit/reproduce.py. A unique id per call means a
+    # successful download can only ever be this job's own output; anything
+    # else cleanly fails to exist instead of resolving to someone else's file.
+    job_id = uuid.uuid4().hex
+    remote_incoming = f"{REMOTE_INCOMING}/{job_id}/{local_path.name}"
+    remote_fixed = f"{REMOTE_FIXED}/{job_id}/{local_path.name}"
 
     try:
-        _ssh_run(f"mkdir -p {REMOTE_INCOMING} {REMOTE_FIXED}")
+        _ssh_run(f"mkdir -p {REMOTE_INCOMING}/{job_id} {REMOTE_FIXED}/{job_id}")
         _scp_up(local_path, remote_incoming)
     except subprocess.CalledProcessError as e:
-        log_activity({"file": str(local_path), "backup": str(backup_path), "error": f"upload failed: {e}"})
+        log_activity({"type": "file_fix", "file": str(local_path), "backup": str(backup_path), "error": f"upload failed: {e}"})
         return f"I couldn't get {local_path.name} up to the server, sir."
 
     instruction = (
@@ -106,7 +130,23 @@ def fix_file(local_path, session_id=None) -> str:
         f"Then tell me, in 2-4 spoken sentences, exactly what you found and "
         f"changed — or say plainly that you found nothing wrong."
     )
-    summary = ask_jarvis(instruction, session_id=session_id)
+    # force_reasoning: this needs the real Claude-with-Bash/Write tier, not
+    # whatever the fast-tier classifier might route a bug-fix instruction
+    # to. allow_background=False: fix_file() downloads immediately after
+    # this returns, so a "still working" placeholder (the normal voice-turn
+    # behavior) would mean downloading before the fix was ever written —
+    # same class of bug as the stale-path issue above, just from the other
+    # end. See jarvis_client.ask_jarvis's own docstring for this exact
+    # tradeoff (learning.py's reflection call makes the same choice).
+    summary = ask_jarvis(instruction, session_id=session_id, force_reasoning=True, allow_background=False, timeout=180)
+
+    if _is_transport_failure(summary):
+        _ssh_run(f"rm -rf {REMOTE_INCOMING}/{job_id} {REMOTE_FIXED}/{job_id}")
+        log_activity({
+            "type": "file_fix", "file": str(local_path), "backup": str(backup_path),
+            "error": f"generation failed: {summary}",
+        })
+        return f"I couldn't get a fix back from the server for {local_path.name}, sir: {summary}"
 
     tmp_path = local_path.with_suffix(local_path.suffix + ".jarvis-download")
     try:
@@ -115,13 +155,15 @@ def fix_file(local_path, session_id=None) -> str:
     except subprocess.CalledProcessError as e:
         tmp_path.unlink(missing_ok=True)
         log_activity({
-            "file": str(local_path), "backup": str(backup_path),
+            "type": "file_fix", "file": str(local_path), "backup": str(backup_path),
             "summary": summary, "error": f"download failed: {e}",
         })
         return f"I looked at {local_path.name} but couldn't retrieve the fixed version, sir. What I found: {summary}"
+    finally:
+        _ssh_run(f"rm -rf {REMOTE_INCOMING}/{job_id} {REMOTE_FIXED}/{job_id}", timeout=10)
 
     log_activity({
-        "file": str(local_path), "backup": str(backup_path), "summary": summary,
+        "type": "file_fix", "file": str(local_path), "backup": str(backup_path), "summary": summary,
     })
     return summary
 

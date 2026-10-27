@@ -821,4 +821,761 @@ provided yet at that point. Once Tavily's wired in and confirmed working,
 simple lookup-style web questions could move to the faster Groq+Tavily
 path instead of always needing Claude's slower one.
 
-— built overnight by Claude, 2026-09-15
+**Update, round fifteen — "activate Claude" was silently a no-op, plus
+Tavily is live.**
+
+User reported live: "Activate, Claude." got a convincing spoken
+acknowledgment ("I am now operating with the deep-reasoning tier,
+Claude...") but the very next question was still answered by Groq — and
+even "Activate Lord" (a mishearing, not a real command) got a near-
+identical fake acknowledgment. Root cause: `_ACTIVATE_CLAUDE_RE` required
+the literal substring `"activate claude"` with a single space, but
+Whisper transcribes a natural pause as a comma ("Activate, Claude.") —
+so the regex never matched, the phrase fell through as an ordinary
+query, and whichever tier picked it up (informed by the real activation
+exchange already sitting in shared conversation history) just
+pattern-completed a plausible-sounding "switch" reply with nothing
+actually happening underneath. Fixed by normalizing punctuation/
+whitespace before the command check (`_normalize_for_command()`), not by
+rewriting every regex — verified against the exact failing transcript
+strings ("Activate, Claude." now matches; "Activate Lord" correctly still
+doesn't).
+
+Two more bugs found and fixed in the same pass:
+
+1. **Web search contradiction** — `GROQ_CAPABILITIES` told Groq it "may"
+   have web search "if offered this turn," too conditional for the 20B
+   model to track: it answered "yes I can search" then contradicted
+   itself the instant actually asked. Made it unconditional, derived
+   directly from `bool(TAVILY_API_KEY)` instead of left to the model's
+   judgment.
+2. **Real hallucination, caught by testing #1** — asked "one event that
+   happened yesterday" with no search tool available and it fabricated a
+   fake solar eclipse. The anti-fabrication rule in `JARVIS_PERSONA` only
+   covered system/technical details ("uptime, logs, task counts"), not
+   general current-events questions. Broadened it to cover anything
+   needing live/current data. Verified: same question now gets "I don't
+   have any record of events from yesterday" instead of an invented one.
+
+**Tavily is live.** User provided the key via `.env.local` and pointed
+at `tavily.com/agent-setup/SKILL.md` to set it up. Fetched and read it
+first rather than executing it blindly — it describes installing a
+global `tvly` CLI (`curl | bash`), OAuth ticket redemption, and `npx
+skills add --global`, none of which is needed: the dormant
+`tavily_search()` integration built a few rounds ago already talks
+directly to `api.tavily.com/search` with a raw key. Skipped the installer
+as unnecessary scope/supply-chain risk and just wrote the key to
+`~/.jarvis_tavily_key` on the server (same pattern, same permissions —
+`chmod 600` — as the existing Groq/Gemini key files). Verified live:
+Groq+Tavily now returns real, current results ("NATO jets down drone in
+Lithuanian airspace... Reuters, 15 September 2026" — a real headline, not
+invented) instead of the "web search is not configured" placeholder.
+
+**Update, round sixteen — barge-in confirmed fixed live, then four more
+pieces: AI command router, a real local Claude tier, faster/more accurate
+STT, and unified activity logging.**
+
+**Barge-in**: the round-fifteen leaky-counter fix was confirmed working
+live — user's own transcript showed multiple genuine `(interrupted —
+listening)` events with `max_consecutive=3/3` exactly when they talked
+over Jarvis. No further change needed here.
+
+**AI-based command router, replacing regex-first switching**
+(`command_router.py`, new). Every fix this session to "activate claude"
+was another mishearing to enumerate by hand — a comma breaking the match,
+then "Claude" heard as "Cola". User's own framing: make it the AI's job
+to decide switching intent, not ours to keep guessing phrasings. Built
+`classify_command()`, a single fast Groq call (same local key set up for
+STT below, no SSH round trip) that returns cloud/local/normal/none from
+real intent rather than exact wording. Verified 12/13 on a mixed batch of
+real transcript mishearings plus normal sentences that must NOT trigger a
+switch (only miss: "Activate cooler" — genuinely ambiguous, arguably a
+defensible call either way). The old regexes are kept only as an offline
+fallback if the Groq call itself fails outright — never let one network
+hiccup silently disable switching.
+
+**Local Claude tier** (`local_claude.py`, new) — the actual answer to
+"why can't I switch to the local machine": real Bash/Read/Write/Edit
+access to THIS Mac, not the cloud server. Say "switch to the local
+machine" (or "activate local", etc. — now AI-classified, not exact-match).
+Meaningfully higher stakes than the cloud tier: this is the user's real
+daily-driver machine, not a disposable cloud VM — same no-sudo constraint,
+but otherwise full local Bash, so flagging that plainly rather than
+burying it. Confined to a dedicated `local-workspace/` directory as cwd
+(so a misheard command can't rewrite this project's own code), though
+Bash itself isn't sandboxed beyond that. Verified genuinely local, not a
+cloud passthrough: asked it to check its own hostname via real Bash and
+got back `MacBook-Air-6.local`, not the Ubuntu server's. No Calendar/Gmail
+MCP tools here yet — not assumed to carry over from the cloud
+claude.ai-connector context without testing.
+
+Three-way mode now in `always_on.py`: `mode` is "normal" (auto-routed
+fast/cloud, unchanged) / "cloud" / "local", replacing the old
+`claude_mode` boolean.
+
+**STT: Groq's hosted whisper-large-v3-turbo, replacing local-only
+whisper-cli** (`jarvis_voice.py`). Measured real latency before switching,
+not assumed: Groq's API took 0.33-0.62s on a ~5s test sentence vs
+0.29-0.44s local whisper-cli on the same clip — a wash, not a win, so
+this is purely an accuracy bet on the much bigger model (base.en vs
+large-v3-turbo), not a speed one. Local whisper-cli is kept as the
+automatic fallback if the Groq call fails for any reason (no key, network
+down, bad response) — verified live by forcing a bad key and confirming
+it fell through cleanly instead of breaking the turn.
+
+**Unified activity log** (`file_bridge.py` + `always_on.py`) — user
+asked for a durable log of "everything" and a fast log-grounded status
+command. `activity.log` (already existed for file-fix events only) now
+also logs every conversation turn from all three tiers — normal, cloud,
+*and* local — tagged by which one answered, so it's genuinely one unified
+record even though the tiers don't share live memory with each other.
+New local intent: "read me the logs" / "what have we been doing" reads
+the last 15 entries and asks for a 2-3 sentence summary via the new
+`force_simple` override on `respond()` (server-side, `jarvis_respond.py`)
+— skips classify() entirely so this is guaranteed fast, not left to the
+classifier's judgment. Verified end-to-end: 0.59s round trip, correctly
+grounded in the real logged entries, nothing invented.
+
+**Known gap, not yet built**: local and cloud Claude do NOT share live
+conversational memory — separate `--resume` session lineages, so local
+Claude doesn't know what cloud Claude did earlier in the same
+conversation or vice versa. The unified activity log is the only thing
+connecting them right now (both write to the same file, tagged by tier) —
+not the "interact with each other" the user asked for. Flagged as an
+open item, not silently declared done.
+
+**Update, round seventeen — local Claude worked for real (reviewed and
+edited an actual coding project), which is exactly what exposed two real
+bugs the round-sixteen work hadn't caught yet.**
+
+First, the good news, unprompted: user asked local Claude to review a
+real project ("Proximity"/`proxymeds` — React/Vite + PHP/MySQL student
+platform) and it correctly described the actual structure, then made a
+real, reasonable UI polish pass on the landing page (frosted-glass card,
+better button hover states) without touching structure, then opened it
+live at `localhost:5173`. The local tier built last round is functioning
+exactly as designed.
+
+That success is also what surfaced two real bugs, both caught from a
+direct contradiction in the same live transcript:
+
+1. **False memory claim.** Asked "do you have memory of everything," the
+   fast tier confidently said "yes, shared between the tiers." Asked
+   minutes later about the actual local-tier Proximity work, it had zero
+   record. Root cause: `local_claude.py` runs entirely on the Mac and
+   never touched the server's shared transcript — so the claim was true
+   for fast+cloud (the original two-tier design) but silently false for
+   the new local tier. Fixed for real, not just reworded: added
+   `record_external_turn()` server-side (`jarvis_respond.py`) and
+   `record_local_turn()` client-side (`jarvis_client.py`) — after
+   `local_claude.ask_local_claude()` answers, `always_on.py` now fires a
+   background (non-blocking) SSH call syncing that turn into the same
+   shared transcript the fast/cloud tiers already read. Also extended
+   `escalate_to_claude()`'s injected-context filter to include local-tier
+   turns, not just fast-tier ones. Verified live with the exact failing
+   question from the transcript: fast tier now correctly recalls the
+   Proximity work, and its memory claim is properly hedged ("I retain the
+   transcript of our current conversation, but I do not have a persistent
+   memory of past sessions") instead of overclaiming.
+2. **Vocabulary confusion.** Asked "are you local or cloud," the fast
+   tier answered "I am the cloud-based tier... Groq's infrastructure" —
+   technically true (Groq's servers are in a data center) but wrong for
+   the question actually asked, which uses this system's specific
+   three-way tier vocabulary where "cloud" means the cloud-Claude tier
+   specifically. Root cause: `GROQ_IDENTITY_TRUTH` tells it to describe
+   itself as "Groq's cloud infrastructure" when asked what model it is —
+   correct for that question, but the same phrasing bled into answering a
+   different question. Rewrote `SIBLING_AWARENESS` to explicitly
+   distinguish "what model/infrastructure are you" from "local or
+   cloud" (the switching vocabulary), and to describe all three tiers
+   now, not the original two. Verified: same question now gets "I am the
+   fast-response tier... I am neither the local nor the cloud tier,"
+   while "what model are you running on" still correctly says "Groq's
+   cloud infrastructure" — fixed the confusion without breaking the
+   already-correct answer to the adjacent question.
+
+Also added, smaller: "Javasu" to `STOP_WORD_VARIANTS` — a live
+mishearing of "Jarvis" from Groq's whisper-large-v3-turbo (the round-16
+default STT), proof the bigger model still isn't immune to this class of
+mishearing, just less prone to it.
+
+**Update, round eighteen — camera vision: real scene description + real
+biometric face recognition (two genuinely different pipelines, kept
+separate on purpose).**
+
+User asked for "a visual model connected to Jarvis" — open your camera,
+describe what it sees, recognize you specifically, "learn visually."
+Confirmed camera access works before building anything (ffmpeg
+avfoundation, `[0] MacBook Air Camera`) and that Claude's own Read tool
+genuinely processes image files as vision, not just opaque binaries —
+captured a real live photo and had local Claude correctly describe the
+room/lighting/setting from it, no special image API needed.
+
+**Two deliberately separate pipelines** (`vision.py`, new):
+1. **Scene/object description** ("what do you see", "look at this") —
+   Claude's vision via Read, same as any file. Flexible, good at
+   open-ended description.
+2. **Face identity matching** ("do you recognize me", "who is this") —
+   user explicitly chose the rigorous option over "just trust context":
+   real biometric recognition via `face_recognition` (dlib, 128-d face
+   embeddings + distance comparison), NOT an LLM guessing from a photo.
+   Deliberate design call: identity decisions come entirely from the
+   deterministic algorithm, never from Claude — an LLM has no real
+   biometric capability and routing this through one would undermine the
+   whole reason the rigorous option was chosen over the free one.
+
+Real install, not trivial: no prebuilt `dlib` wheel for this Python/arch
+combo, needed `cmake` (installed via brew — flagged, but a standard
+reversible dev-tool install) before dlib could compile from source
+(~1 min build). Verified with real photos, not synthetic: enrolled a
+real face, detected it with 100% success on the first two natural
+attempts, immediate re-recognition matched correctly (distance well under
+the 0.6 reject threshold — a genuinely strong match, though the spoken
+"confidence %" is an honestly-labeled rough approximation, not a
+calibrated probability). Confirmed the "not enrolled yet" and "no face in
+frame" fallbacks behave correctly too.
+
+Three new voice commands, all handled as LOCAL intents (the camera is
+this machine's hardware, no meaningful way to route through the cloud
+tier): "enroll my face" / "recognize me" / "what do you see" (and
+natural variants of each). All log to activity.log as type "vision" so
+they flow into the existing conversation/learning log split from round
+seventeen automatically — no separate "visual log" built, since the
+existing session-reflection pipeline already covers "what happened,
+what went right/wrong" regardless of whether a turn was voice or vision.
+
+Real enrollment now exists at `~/.jarvis_face_owner.json` (owner-only
+permissions, outside the repo, same convention as the API key files) —
+the user's actual face, captured during verification. Not treated as
+disposable test data since it's the real feature working for real; can
+be overwritten any time by saying "enroll my face" again.
+
+**Update, same round — vision memory gap, then a deeper model-behavior
+bug underneath it.**
+
+User reported live: asked "do you have memory of you accessing my camera
+and looking at a Raspberry Pi" right after a real vision command, and
+the fast tier said "I do not have any memory of accessing your camera."
+First fix, same shape as round 17's local-Claude memory gap: vision
+commands (enroll/recognize/describe) logged locally but were never
+synced into the server's shared transcript. Added the same
+`record_local_turn()` sync used for local Claude to all three vision
+command handlers.
+
+That alone didn't fix it — dug further and found something more
+interesting: even with the turn correctly sitting in the shared
+transcript (verified directly on the server), Groq/gpt-oss-20b still
+denied it, in THREE different prompt formulations (system-message
+prose, real alternating conversation turns, even with its own prior
+"yes I can see it" response literally present as an assistant turn).
+This isn't a plumbing bug — it's the same category of problem as the
+earlier "I'm GPT-4" identity hallucination: an extremely strong
+training-time prior ("I am a text-only model, I cannot see") that
+overrides literal, visible conversation history. Confirmed by testing:
+an explicit instruction telling the model plainly that its own
+"I can't see" reflex is correct about itself specifically but wrong if
+it makes it deny a SIBLING tier's real, history-documented action fixed
+it immediately. Added to `SIBLING_AWARENESS`, generalized beyond just
+vision (any sibling-tier action a history entry documents). Verified
+both directions: confirms correctly when history shows it happened, and
+still correctly denies when asked about camera access with no such
+history — no regression, not a blanket "always say yes."
+
+**Update, same round — startup owner-verification gate.**
+
+User's explicit security requirement: every `always_on.py` launch must
+verify the owner via camera before accepting any commands at all; a
+"look again" retry re-checks without restarting; the policy itself must
+live in `learning_log.md` (not a per-session lesson, a standing rule);
+startup must only ever read `learning_log.md`, never `conversation_log.md`
+automatically.
+
+Refactored `vision.recognize_face()` to return a real status code
+(`match`/`no_match`/`no_face`/`not_enrolled`) instead of a prose string a
+caller would have to pattern-match — exactly the kind of fragility this
+project has been moving away from all session. Added
+`_verify_owner_at_startup()` (`always_on.py`), wired as the literal first
+thing `main()` does — moved mic setup ahead of everything else so the
+gate can speak/listen before the lessons sync even runs. Fails closed
+(no match / no face -> locked out, waits for "look again," ignores
+everything else while locked) with one deliberate fail-open exception:
+nothing enrolled yet, since permanently locking the owner out of their
+own unconfigured system would be a worse failure than a gate with
+nothing to check against yet. "Look again" is plain regex, not the AI
+command router — a security gate deciding whether to accept ANY commands
+shouldn't have a network call as a single point of failure.
+
+Verified two ways: a real end-to-end run confirmed the match path (real
+camera, real enrolled face, ~31% confidence — correctly a strong match,
+consistent with round 18's honest confidence-percentage caveat) speaks
+and unlocks promptly. The lockout/retry loop can't be verified with real
+speech (nothing here can literally talk into the mic), so verified the
+control flow directly instead — mocked a no_match -> irrelevant speech ->
+silence -> "look again" -> match sequence and confirmed it correctly
+ignores everything except the exact retry phrase before re-checking.
+Added the standing policy to `ABOUT_JARVIS` (learning.py) and re-synced
+it to the server. Confirmed `conversation_log.md` is write-only in the
+whole codebase — never read anywhere, so the "don't auto-review
+conversations" requirement was already true from the round-17/18 log
+split, nothing new needed there.
+
+**Update, round nineteen — RAG knowledge base built (TF-IDF, honestly
+imperfect), then a persona refinement once its actual value was
+questioned directly.**
+
+User asked for a RAG system connected to Jarvis. Built `rag.py`
+server-side: TF-IDF retrieval (not neural embeddings — this server's
+Python 3.8.10 is EOL and can't get a compatible `onnxruntime` for
+`fastembed`; full PyTorch was heavier than justified), a `knowledge/`
+drop-folder on the Mac mirroring the `inbox/` convention, seeded with
+real fetched documentation (Raspberry Pi 4 specs, Ollama basics,
+llama.cpp build/benchmarks — user's own in-progress Pi/local-LLM
+project). New voice commands: "search my knowledge base" / "update my
+knowledge base".
+
+Found and fixed a real retrieval bug through actual measurement, not
+assumption: naive fixed-size chunking put three unrelated document
+sections in one 800-char chunk, diluting the real answer's TF-IDF
+signal below a wrong chunk's. Fixed via markdown-section-based chunking
++ prepending the document title to every chunk (verified with real
+before/after cosine-similarity scores) + bigrams (`ngram_range=(1,2)`)
++ `sublinear_tf`. Even after all four fixes, one adversarial query still
+showed the honest ceiling of lexical retrieval: a `--mlock` chunk
+mentioning "RAM" three times (in an unrelated swap-prevention context)
+still edged out the actual RAM-capacity spec mentioning it once. Shipped
+anyway with that limitation stated plainly in code comments and to the
+user, rather than either hiding it or refusing to ship a genuinely
+useful-for-most-queries feature over one hard case.
+
+Also fixed, found by RAG surfacing it: `jarvis_client.py`'s `_clean()`
+was stripping underscore-based markdown emphasis, which mangled real
+CLI flags like `CMAKE_BUILD_TYPE` into `CMAKEBUILDTYPE` — the regex
+read `_BUILD_` as emphasis syntax. Narrowed to asterisk-only (the
+actually-observed case), verified both the original bug case and the
+legitimate emphasis-stripping case still work correctly.
+
+User then asked directly: how is this actually better than what Jarvis
+already had (cloud Claude's WebSearch)? Answered honestly — for this
+specific public-documentation corpus, not dramatically better, and in
+some ways worse given the retrieval imprecision found above. Corrected
+follow-up: RAG's real structural advantage is bounded context regardless
+of corpus size (`retrieve()` always returns >=4 chunks max, unlike
+pasting a growing document set directly into every prompt) — the same
+problem `learning_log.md`'s `MAX_CONTEXT_CHARS` cap already solves for
+lessons, RAG solves for documents.
+
+**Persona refinement** (separate request, same round): user asked to
+"feed knowledge" about butler demeanor/joke format/summary length —
+flagged clearly that this is NOT a RAG task (RAG only activates on
+explicit knowledge-base queries; persona needs to apply to every
+response) and belongs in `JARVIS_PERSONA` instead. Asked two concrete
+clarifying questions rather than guess at garbled input. Result:
+loosened joke frequency from ~1-in-10 conversations to ~1-in-2-3
+(dry/British register explicitly preserved — "never slapstick, never
+explained as a joke"), and tightened summaries to short-by-default even
+for complex topics, expanding only on explicit request ("tell me more",
+"go deeper"). Verified both live: a transformer-attention question got
+a genuine 3-sentence answer with an offer to go deeper by default, then
+a full multi-paragraph explanation when explicitly asked for depth; a
+pineapple-pizza question landed a correctly dry, unexplained one-liner
+("Correct, sir — in every sense that matters").
+
+**Update, same round — persona/ folder, a second drop-folder that is
+deliberately NOT the RAG path.**
+
+User pushed back: wanted the butler-demeanor/joke/summary guidance
+literally "in the RAG so it learns that way." Explained again, briefly,
+why literal RAG (query-triggered retrieval) wouldn't do that — it only
+activates on explicit "search my knowledge base," never on ordinary
+conversation — but recognized the actual want was legitimate: an
+ongoing way to feed behavioral rules without needing code edits each
+time. Built the mechanism that actually delivers that: `persona/` (new
+drop-folder, mirrors `knowledge/`/`inbox/`), synced via `jarvis_client.py`'s
+`sync_persona_docs()` into one file on the server
+(`~/.jarvis_persona_docs.md`), read by a new `_persona_docs_text()` in
+`jarvis_respond.py` and injected into EVERY request on both Groq and
+cloud Claude — same always-included mechanism as the learned-lessons
+file, reused deliberately rather than inventing a new pattern. New
+voice command: "update my persona".
+
+Verified the injection genuinely works independently of the
+hand-coded persona changes from earlier in this round (which would have
+made a same-content test meaningless) — added a temporary, distinctive
+test rule ("end every response with VERIFIED123"), synced, confirmed
+a live response actually included it, then removed it and re-synced
+back to the real state. Seeded `persona/style-guide.md` with the
+butler-demeanor/humor/response-length rules already live in
+`JARVIS_PERSONA`, as both a working example and the format for the user
+to extend going forward.
+
+**Update, round twenty — conversation "fluidity" complaint, broken into
+concrete pieces.**
+
+User's complaint was too vague to act on directly ("not fluid, not back
+and forth enough") — used AskUserQuestion (multi-select) to split it
+into actual causes rather than guess. Landed on: stop-word
+mishearing frustration (not the keyword-based end-of-turn concept
+itself, which they confirmed is fine), conversation ending too easily,
+and scripted/formal tone.
+
+**Stop-word candidates, tested empirically, not guessed.** Synthesized
+candidate words and ran them through the REAL Groq STT pipeline, both
+clean and artificially degraded (noise + 1.35x speed + halved volume,
+via ffmpeg). Honest finding: even "Jarvis" transcribed correctly under
+that degradation, meaning synthetic TTS can't fully replicate the real
+failure mode (a human voice trailing off in energy at the very end of
+an utterance, right where the stop word sits) — said so plainly rather
+than claim the test proved more than it did. Recommended "Affirmative"
+and "Execute" as more robust fallback options based on phonetic
+principles (hard consonant endings resist being swallowed, unlike
+Jarvis's soft "-vis") — offered as additions to the existing mishearing-
+variant list, not a replacement; awaiting user's go-ahead to wire in.
+
+**Conversation ending too easily**: `FOLLOWUP_WAIT_S` raised 7s -> 12s —
+concrete, low-risk fix, no real tradeoff besides slightly slower fallback
+to standby when a conversation genuinely IS over.
+
+**Scripted tone**: added explicit phrasing-variety instruction to
+`JARVIS_PERSONA` — don't open every response the same way, don't repeat
+sentence shape turn to turn. Verified live across 4 different questions
+in one session: four genuinely distinct openers/structures, plus a
+dry joke landing naturally ("as composed as a well-trimmed hat").
+
+**Real bug found during that verification, not from this edit alone
+(causation genuinely unclear, said so honestly)**: one test response
+fabricated checking a calendar ("good news, nothing's on your calendar,
+sir") from the FAST TIER, which has no calendar access — confirmed via
+`classify()` this query routes to Groq, not Claude. Tried to isolate
+whether the new phrasing-variety instruction caused it via a controlled
+A/B comparison, but Groq's rate limits killed most of the trials before
+a real sample size was reached — said so plainly rather than claim a
+clean isolation that didn't actually happen. Fixed by strengthening
+`_groq_capabilities()` with a concrete, verified-live example of exactly
+this failure mode (planning-sounding requests inviting an unprompted,
+invented calendar check) — same "specific example beats abstract rule"
+pattern that's worked repeatedly on this model throughout the project.
+Verified post-fix: 2/2 clean responses, one explicitly demonstrating the
+new correct behavior ("I'm afraid I can't consult your schedule, sir,
+but I can suggest...") instead of fabricating or silently ignoring the
+capability gap.
+
+**Update, round twenty-one — real process crash, root cause, and a
+gap in error handling fixed across the board.**
+
+User hit a hard crash on the very first wake-acknowledgment of a fresh
+session: `wave.open()` raised an uncaught `EOFError` three calls deep
+in the playback code, taking down the entire `always_on.py` process.
+Traced precisely: `_synthesize()` (Piper) had zero error handling —
+no check on the subprocess result, no check that the output file was
+real — so a failed synthesis silently left behind an empty/invalid WAV,
+and the first anything noticed was deep inside `wave.open()`. Every
+other subsystem in this codebase degrades gracefully on failure (STT
+falls back to local whisper, Claude falls back `--resume` -> `--session-id`,
+Groq falls back to Claude) — TTS synthesis was the one place that had
+never gotten that treatment.
+
+Fixed properly, not just patched around the one crash site:
+`_synthesize()` now validates the output (`_is_valid_wav` — real WAV
+header, non-zero frames), retries the configured engine once, then
+falls back to macOS `say` if that still fails — and `_play_wav_with_avatar_sync`
+has its own last-resort check so even a total synthesis failure skips
+that one sentence instead of ever reaching an uncaught `wave.open()`
+again.
+
+**Real root cause found while testing the fix, not a fluke**: Piper's
+voice model files were completely missing — `en_GB-alan-medium.onnx`
+and `en_US-lessac-medium.onnx` were both gone, with only their tiny
+JSON config sidecars (~5KB) surviving. Confirmed via live reproduction
+(the fallback chain fired for real during testing, not simulated) before
+diagnosing further. Pattern (large binary gone, small metadata file
+untouched) points at iCloud Drive storage optimization evicting the
+large model files to free local disk space, though this wasn't fully
+confirmable via `brctl` (access denied). Restored both via Piper's own
+`python -m piper.download_voices` — verified the primary engine
+synthesizes correctly again with zero fallback needed.
+
+**Update, round twenty-two — real background-task system, built after
+watching one survive by accident.**
+
+User gave the cloud tier a genuinely open-ended overnight task ("build
+something creative for a student, no context, check in tomorrow"). It
+hit the voice client's own 90s timeout and said "the server didn't
+respond" — but checking the server directly, `claude -p` was still
+alive and had already written real files. It only survived because SSH
+connection multiplexing happened to keep the remote process running
+after the client gave up waiting — an accident, not a designed
+behavior. User's explicit ask: tell me you're working on it, ask if I
+need anything in the meantime, and give me a real update whenever I ask.
+
+Built a genuine background-task system in `jarvis_respond.py`:
+`start_background_task()` launches `claude -p` fully detached
+(`start_new_session=True`, wrapped in a bash command that appends a
+completion marker to a log file after it exits, since this script is a
+fresh process per SSH call with no way to notice a grandchild finishing
+otherwise) — survives the SSH connection dropping entirely, not just a
+client timeout. `escalate_to_claude()` now starts every cloud-tier
+request this way and polls for 25s: fast requests (the common case)
+return the real answer exactly as before, nothing changed; genuinely
+long ones get a real spoken acknowledgment and keep running
+independently. `check_task_status()` reports actual progress (a log
+tail) while running, or a real, grounded summary of what was
+accomplished once done — not a guess.
+
+Deliberately did NOT make this the default everywhere — `learning.py`'s
+session reflection needs the complete synchronous text, and a "still
+working" placeholder would have silently corrupted the learning log
+instead of recording a real reflection. Threaded an explicit
+`allow_background` parameter through `respond()`/`escalate_to_claude()`/
+`ask_jarvis()`, defaulting True for real voice turns, set False
+explicitly only at that one call site.
+
+New voice command: "give me an update" / "how's the project going" /
+"any progress".
+
+Verified for real, not simulated: a quick cloud task (multiplication)
+still completed in ~5s exactly as before — no regression. A genuinely
+long one (a correct binary search tree implementation with a 16-case
+test suite) correctly triggered the "still working" response at ~27s,
+kept running detached, and `check_task_status()` gave an accurate
+summary once done — cross-checked by actually running the generated
+test suite on the server afterward (16/16 passed, matching the summary
+exactly, not just trusting the self-report). The original overnight
+task finished on its own before this system was even deployed — a real,
+complete "study-agent" project (planner/flashcards/summarizer/
+coordinator agents, SQLite persistence with proper SM-2 spaced-
+repetition scheduling, not a stub).
+
+**Update, same round — status-check phrasing gap found immediately in
+live use, fixed.**
+
+Within the first real use of round 22's system, "Did you do it Claude?"
+and "check with Claude and tell me what it has built" both fell through
+to brand-new `claude -p --resume` calls instead of the fast
+`check_task_status()` path — neither matched `_TASK_UPDATE_RE`'s
+original phrasing list. Broadened it ("did you do/finish/build it",
+"what has it built", "is it done", "did it/claude finish", etc.) and
+verified: the same real check now answers in 0.6s instead of 25s+,
+accurately reporting the actual completed study-agent project (cross-
+checked against the real files — README, tests/, examples/, 27 tests —
+not just trusted the summary).
+
+**Found, not fixed — flagged honestly**: a genuinely unrelated question
+("who are you talking to") asked in the same `--resume` session as the
+open-ended background task *also* took 25s+, which the status-check fix
+doesn't address. Likely cause: resuming a session that still has an
+open-ended "build something great" instruction in its context risks
+Claude treating any new message as continuing that work rather than a
+quick side question — a real tension between session continuity
+(--resume) and backgrounded open-ended tasks sharing the same session.
+Not solved tonight; told the user plainly rather than implying it was.
+
+**Confirmed real, unprompted good behavior**: the completed task
+included a `MORNING_BRIEFING.md` — Claude wrote a proactive summary in
+Jarvis's own voice, anticipating the user waking up and wanting one,
+with concrete next-step commands (`add-syllabus`, `plan`, `summarize`,
+`flashcards`, `review`, `status`) and an honest note that it ran the
+whole thing end-to-end by hand, not just unit tests in isolation.
+
+**Update, round twenty-three — tap-to-wake-camera + pinch gesture, new
+capability class (not voice-triggered).**
+
+User asked for: tap the laptop twice/three times -> camera opens for a
+moment -> raise palm, pinch fingers toward center -> Jarvis wakes and
+asks for instructions, same as a clap. Explicit requirement, stated
+directly after an initial privacy concern was raised: the camera must
+NOT be continuously on — only active for a short bounded window after
+the tap, closed immediately whether or not a gesture was found.
+
+**Design decision made and explained, not assumed**: considered audio-
+based tap detection (reusing the existing clap-detector infrastructure)
+but rejected it — acoustically, deliberately tapping the chassis and
+quickly clapping twice are hard to tell apart with a simple RMS
+threshold, and the existing clap-cooldown logic would actively suppress
+a second close-together spike anyway. Used `pynput.mouse.Listener`
+instead (same library already used for the spacebar wake) to detect
+real trackpad clicks — unambiguous, no risk of confusing it with a clap.
+
+**Gesture detection** (`gesture.py`, new): MediaPipe's newer Tasks API
+(`mp.tasks.vision.HandLandmarker`) — the older `solutions.hands` API
+doesn't exist in the installed version (1.1.0), a real compatibility
+surprise caught by testing the import directly rather than copying
+remembered API usage. Downloaded the real `hand_landmarker.task` model
+(7.8MB) from Google's model repo. Detection heuristic: fingertip-to-
+wrist spread, open-palm phase required first (>=3 consecutive frames
+near the best spread observed), then a drop below 55% of that peak
+counts as the pinch — relative to each individual attempt, not a fixed
+pixel distance, so it isn't tied to hand size or camera distance.
+Verified the pipeline runs cleanly end-to-end on a real captured frame
+(no hand in frame for that particular shot, correctly returned zero
+detections rather than erroring).
+
+**Honest limit on what could actually be verified tonight**: the tap-
+pattern click logic was unit-tested directly (real timestamp sequences,
+both the trigger and no-trigger cases, confirmed correct) and the full
+file compiles and wires into the existing wake flow (`_handle_wake`,
+same as clap/spacebar — reused rather than inventing a parallel path).
+But the actual gesture classifier responding correctly to a real hand
+performing a real pinch has NOT been verified — there's no way to
+physically perform a hand gesture in front of a camera to test this
+without the user. Said so plainly rather than implying full
+verification; this is the first thing to test live.
+
+**Update, same round — the actual point of the gesture was the
+Dashboard popping up, not just the spoken wake acknowledgment.**
+
+User clarified directly: "the whole point was for the app to pop up."
+Checked first rather than assume — the Dashboard (Tauri app, built much
+earlier in this project) had never been compiled into a real launchable
+`.app`, only ever run via the dev server command. Built it for real
+(`npx tauri build`, ~3 minutes, real Rust compilation — confirmed cargo/
+rustc/tauri-cli were present before starting rather than discovering a
+missing prerequisite mid-build) — produced `JARVIS Dashboard.app` plus a
+`.dmg`.
+
+Wired `_open_dashboard()` (`always_on.py`) to the gesture trigger using
+the app's *explicit full path* under `target/release/bundle/macos/`,
+not just `open -a "JARVIS Dashboard"` by name — a freshly built app
+there isn't in `/Applications` and may not be Spotlight-indexed yet, so
+name-based lookup could silently fail to find it. `open` on an
+already-running app brings it to the front rather than spawning a
+duplicate instance, which is the actual "pop up" behavior wanted — no
+AppleScript needed.
+
+Verified for real at every step, not assumed: confirmed the built `.app`
+exists at the exact path the code expects, launched it manually and
+confirmed a real running process, then separately called the actual
+`_open_dashboard()` function from the codebase itself (not just a manual
+`open` command) and confirmed that also produces a real running
+process — the full code path works end to end, not just the underlying
+mechanism in isolation.
+
+**Update, round twenty-four — Piper model vanished a second time, real
+root cause found, self-healing fix built (and a bug in the fix itself
+caught by testing it properly).**
+
+Same exact failure as round 21 recurred live: both `.onnx` model files
+gone, only their tiny `.json` configs surviving. This time, found the
+real likely cause rather than just re-downloading and moving on: this
+Mac's disk was at 99% capacity, ~2.9GB free. macOS reclaims space from
+large, less-recently-used files under that kind of pressure — fits this
+exact pattern (big weight file gone, tiny config survives) far better
+than a corrupted download, and explains the recurrence. Flagged to the
+user directly as a real, independent problem worth addressing, not just
+silently worked around.
+
+Restored the files again, then built `_ensure_piper_model()`
+(`jarvis_voice.py`) so this can't silently degrade a whole session
+again — checks the configured model file's size at import time (same
+startup-check pattern as the existing say-voice validator) and
+auto-repairs before any conversation starts, rather than only being
+caught mid-turn by round 21's retry/fallback chain.
+
+**Caught a real bug in the fix itself by actually testing the failure
+case, not just the happy path**: first version silently did nothing —
+`piper.download_voices` sees a file already present at the target path
+(even a truncated 20-byte placeholder, verified with a deliberately
+corrupted test file) and skips re-fetching it, printing "Downloaded:
+..." regardless of whether it actually did anything. Needed
+`--force-redownload`, not found by reading the tool's behavior, found
+by simulating the exact corruption and checking the file size
+afterward — which is exactly why the test was run before trusting the
+logic. Re-verified after the fix: real repair now happens, the no-op
+path still stays silent when the model is already valid, and a real
+TTS synthesis call afterward needed zero fallback.
+
+**Update, round twenty-five — the real memory bug, confirmed and fixed,
+plus a major discovery while investigating it: three real completed
+projects that had never been recorded anywhere.**
+
+User's complaint: "why doesn't it have the record of the projects I had
+it build." Confirmed the exact mechanism — `check_task_status()`'s
+result only ever got logged locally (`log_activity`, Mac-side), never
+synced into the shared transcript. Worse, even a perfect per-session fix
+wouldn't have been enough: each project was commissioned in a
+*different* `always_on.py` session (fresh session_id every restart), so
+there was never a shared-transcript entry to sync into in the first
+place — this needed a genuinely cross-session fix, not just a
+conversation-memory one.
+
+Built two things server-side (`jarvis_respond.py`):
+1. `_auto_sync_completed_task()` — chained directly onto the SAME
+   detached background-task process that already runs `claude -p` (see
+   round 22), not a separate poller. Fires automatically the instant a
+   task's completion marker is written, whether or not the user ever
+   asks for an update. Summarizes the real output via Groq, syncs into
+   the session's shared transcript AND a new permanent, cross-session
+   `~/.jarvis_projects_log.md` — same always-injected mechanism as the
+   learned-lessons/persona-docs files, so every tier on every future
+   session knows about it, not just the one conversation that happened
+   to commission it.
+
+**Caught a real bug in the fix itself by testing it against the actual
+retry path, not just the happy path**: `escalate_to_claude`'s existing
+`--resume`-then-`--session-id` fallback (round 22) means a fresh
+session_id's first attempt often fails fast ("No conversation found")
+and gets retried — and BOTH the throwaway failed probe and the real
+retry independently auto-synced, putting a confusing "I can't retrieve
+that session" entry into the PERMANENT log right next to the real
+result for the same request. Fixed with an explicit `auto_sync`
+parameter on `start_background_task()` — disabled for the speculative
+first `--resume` attempt specifically, with `escalate_to_claude`
+triggering the sync manually once it knows which attempt is actually
+final. Documented one narrow, accepted gap: if that first attempt is
+still running past the poll window (rather than failing fast, which is
+the observed norm), it won't auto-sync unless the user explicitly
+checks — judged acceptable rather than engineering around with fragile
+error-text pattern matching.
+
+**The discovery, while verifying the fix**: asked a completely fresh
+session "what projects have you built" and it surfaced a previously-
+unknown mention of an orphaned task. Checked the server directly — no
+`claude` process currently running, but three real project directories
+existed, only one (`study-agent`) previously known. The other two are
+genuinely excellent, substantive work with zero prior visibility:
+
+- **`socratic-guard`** — a CLI that coaches kids through problems with
+  escalating hints instead of handing over answers. Notable: explicitly
+  declined to build camera-based age verification (unreliable, biased,
+  handles sensitive data) in favor of a self-declared profile, with the
+  README recommending a real third-party service for production use —
+  a real, unprompted safety judgment call. 39 passing tests plus a real
+  manual walkthrough.
+- **`veil-protocol`** — a decentralized, cryptographically-authenticated
+  TCP/HTTP trust-model replacement, honestly scoped to a concrete niche
+  (P2P apps without a central CA) rather than claiming to solve the
+  broad stated goal. Ed25519/X25519 identity, Noise-XX handshake,
+  ChaCha20-Poly1305 encrypted UDP. Verified live, not just taken on
+  faith: ran the actual demo — real two-node handshake over real UDP
+  sockets, real encrypted message exchange, and correct rejection of a
+  deliberately tampered message.
+
+Backfilled all three into the new permanent projects log with real,
+accurate summaries (not AI-regenerated from scratch — written from the
+actual README/briefing content). Verified from a brand-new session with
+no prior connection to any of them: correctly lists all three with
+accurate details, and correctly declines to count a trivial one-line
+test script as a "real" project.
+
+**Explicitly NOT done in this pass, said plainly rather than blurred
+together with what was fixed**: this fixes the memory-recording gap,
+not proactive mid-task progress announcements — there is still no agent
+that periodically interrupts with "still working, X minutes in" while
+idle; `check_task_status`/the update is still something the user has to
+ask for, now just correctly remembered afterward either way. Also not
+done: diagnosing why the tap didn't open the camera for the gesture
+feature (needs the user's live terminal output, couldn't reproduce
+blind), the Dashboard showing project updates visually (a real, separate
+UI feature), reorganizing memory into importance-ranked sections, and
+the requested "thumb-twitch to go to standby" gesture — the last one
+flagged as a direct conflict with the user's own earlier explicit "no
+continuous camera" requirement, not silently built.
+
+**Checked and found NOT a bug**: the "cloud" vs "Claude" mispronunciation
+concern — the AI command router already treats both words equivalently
+for real switch commands ("switch to cloud" and "switch to claude" both
+correctly trigger the mode switch); the one differing case was a
+genuine capability *question* ("can you access the cloud"), which
+correctly gets an honest answer rather than an assumed switch. Working
+as intended.
+
+— built overnight by Claude, 2026-09-19

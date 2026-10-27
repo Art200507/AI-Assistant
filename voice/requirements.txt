@@ -2,3 +2,13 @@ piper-tts
 pynput
 kokoro-onnx
 soundfile
+requests
+
+# Camera/biometric features only (face enrollment/recognition, gesture
+# wake) — NOT needed for a default install. always_on.py now imports
+# vision/gesture lazily, only when JARVIS_REQUIRE_BIOMETRIC_GATE is set
+# (off by default). Install these only if you re-enable that gate:
+#   face_recognition
+#   numpy
+#   opencv-python
+#   mediapipe

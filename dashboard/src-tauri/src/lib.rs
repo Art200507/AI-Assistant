@@ -227,6 +227,248 @@ fn fetch_voice_state() -> VoiceState {
     }
 }
 
+// --- Real background tasks (the conversational "Claude, build me X" task
+// system — jarvis_respond.py's start_background_task/TASKS_DIR), NOT the
+// orchestrator's task_results.jsonl above, which is a separate, unrelated
+// system that stays empty in normal use. This is what actually answers
+// "why does the app show no tasks" — the old panel was pointed at the
+// wrong data source entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct BgTask {
+    task_id: String,
+    #[serde(default)]
+    user_input: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    started_at: Option<f64>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    exit_code: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BgTasksResponse {
+    ok: bool,
+    error: Option<String>,
+    tasks: Vec<BgTask>,
+}
+
+const REMOTE_JARVIS_DIR: &str = "/home/ubuntu/JARVIS";
+const REMOTE_EXTRA_PATH: &str = "/home/ubuntu/.local/bin";
+
+#[tauri::command]
+fn fetch_background_tasks() -> BgTasksResponse {
+    let cfg = load_config();
+    let remote_cmd = format!(
+        "export PATH=\"{REMOTE_EXTRA_PATH}:$PATH\"; python3 -c \"import sys; sys.path.insert(0, '{REMOTE_JARVIS_DIR}'); import jarvis_respond as jr; print(jr.list_background_tasks())\""
+    );
+
+    let output = Command::new("ssh")
+        .arg("-i")
+        .arg(&cfg.ssh_key_path)
+        .arg("-o")
+        .arg("ConnectTimeout=8")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg(format!("{}@{}", cfg.ssh_user, cfg.ssh_host))
+        .arg(remote_cmd)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            match serde_json::from_str::<Vec<BgTask>>(stdout.trim()) {
+                Ok(tasks) => BgTasksResponse {
+                    ok: true,
+                    error: None,
+                    tasks,
+                },
+                Err(e) => BgTasksResponse {
+                    ok: false,
+                    error: Some(format!("Couldn't parse task data: {e}")),
+                    tasks: vec![],
+                },
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            BgTasksResponse {
+                ok: false,
+                error: Some(if stderr.trim().is_empty() {
+                    "SSH command failed with no error output".into()
+                } else {
+                    stderr
+                }),
+                tasks: vec![],
+            }
+        }
+        Err(e) => BgTasksResponse {
+            ok: false,
+            error: Some(format!("Failed to run ssh: {e}")),
+            tasks: vec![],
+        },
+    }
+}
+
+// --- Permanent cross-session project record (~/.jarvis_projects_log.md on
+// the server — see jarvis_respond.py's PROJECTS_LOG_FILE). Session
+// transcripts reset every always_on.py restart; this file is the one
+// durable record of what's actually been built across all of them.
+#[derive(Debug, Clone, Serialize)]
+struct ProjectsLogResponse {
+    ok: bool,
+    error: Option<String>,
+    content: String,
+}
+
+#[tauri::command]
+fn fetch_projects_log() -> ProjectsLogResponse {
+    let cfg = load_config();
+    let output = Command::new("ssh")
+        .arg("-i")
+        .arg(&cfg.ssh_key_path)
+        .arg("-o")
+        .arg("ConnectTimeout=8")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg(format!("{}@{}", cfg.ssh_user, cfg.ssh_host))
+        .arg("cat ~/.jarvis_projects_log.md 2>/dev/null")
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => ProjectsLogResponse {
+            ok: true,
+            error: None,
+            content: String::from_utf8_lossy(&out.stdout).to_string(),
+        },
+        Ok(out) => ProjectsLogResponse {
+            ok: false,
+            error: Some(String::from_utf8_lossy(&out.stderr).to_string()),
+            content: String::new(),
+        },
+        Err(e) => ProjectsLogResponse {
+            ok: false,
+            error: Some(format!("Failed to run ssh: {e}")),
+            content: String::new(),
+        },
+    }
+}
+
+// --- Live routing "bird's eye view": which tier handled the most recent
+// turn (local / fast-Groq / cloud-Claude / lookup). Two independent
+// sources because "local" mode never reaches the server at all:
+//   - server writes ~/jarvis-workspace/route_state.json on every call to
+//     respond() (covers lookup/simple/reasoning — see
+//     jarvis_respond.py's _write_route_state)
+//   - this Mac writes ~/.jarvis-dashboard/routing_state.json only when
+//     routing to local Claude (see routing_state.py / always_on.py)
+// Whichever file has the newer timestamp is the current route — a real
+// merge of two genuinely separate event streams, not a guess.
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RemoteRouteRaw {
+    #[serde(default)]
+    route: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    preview: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    timestamp: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LocalRoutingRaw {
+    #[serde(default)]
+    tier: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    detail: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    timestamp: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct RoutingState {
+    tier: String,
+    label: String,
+    detail: String,
+    status: String,
+    timestamp: f64,
+    source: String,
+}
+
+fn routing_state_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(format!("{home}/.jarvis-dashboard/routing_state.json"))
+}
+
+#[tauri::command]
+fn fetch_routing_state() -> RoutingState {
+    let cfg = load_config();
+
+    let local_raw: LocalRoutingRaw = fs::read_to_string(routing_state_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let remote_raw: RemoteRouteRaw = Command::new("ssh")
+        .arg("-i")
+        .arg(&cfg.ssh_key_path)
+        .arg("-o")
+        .arg("ConnectTimeout=6")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg(format!("{}@{}", cfg.ssh_user, cfg.ssh_host))
+        .arg("cat ~/jarvis-workspace/route_state.json 2>/dev/null")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+        .unwrap_or_default();
+
+    if local_raw.timestamp > remote_raw.timestamp {
+        RoutingState {
+            tier: local_raw.tier,
+            label: local_raw.label,
+            detail: local_raw.detail,
+            status: local_raw.status,
+            timestamp: local_raw.timestamp,
+            source: "local-mac".into(),
+        }
+    } else if remote_raw.timestamp > 0.0 {
+        RoutingState {
+            tier: remote_raw.route,
+            label: remote_raw.label,
+            detail: remote_raw.preview,
+            status: remote_raw.status,
+            timestamp: remote_raw.timestamp,
+            source: "server".into(),
+        }
+    } else {
+        RoutingState {
+            tier: "unknown".into(),
+            label: "No routing activity yet".into(),
+            detail: String::new(),
+            status: "idle".into(),
+            timestamp: 0.0,
+            source: "none".into(),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -235,6 +477,9 @@ pub fn run() {
             fetch_tasks,
             fetch_service_status,
             fetch_voice_state,
+            fetch_background_tasks,
+            fetch_projects_log,
+            fetch_routing_state,
             get_config
         ])
         .run(tauri::generate_context!())

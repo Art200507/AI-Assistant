@@ -26,6 +26,12 @@ phone/.env
 # Runtime logs
 os-bridge/actions.log
 activity.log
+conversation_log.md
+learning_log.md
+.last_reflected_ts
+
+# macOS
+.DS_Store
 
 # File-bridge runtime data — files you actually dropped in / backups of
 # your real files, not something to track in git

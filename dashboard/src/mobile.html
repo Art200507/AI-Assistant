@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#02060a" />
+    <title>J.A.R.V.I.S. — Status</title>
+    <!-- Must load before main.js: this is what defines window.__JARVIS_BRIDGE__
+         for a plain browser tab, the same way electron/preload.cjs does it
+         for the Electron build — main.js itself doesn't know or care which
+         one actually provided it. -->
+    <script src="/mobile-bridge.js"></script>
+    <script type="module" src="./main.js" defer></script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+      }
+    </script>
+  </head>
+
+  <body class="mobile">
+    <div class="scanlines"></div>
+
+    <div id="scene-bg">
+      <div id="avatar-canvas"></div>
+    </div>
+    <div class="center-status">
+      <div class="avatar-state" id="avatar-state">IDLE</div>
+      <div class="avatar-sub" id="avatar-sub">voice link idle — say the word</div>
+    </div>
+
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">J.A.R.V.I.S.</span>
+          <span class="brand-sub">STATUS INTERFACE</span>
+        </div>
+        <div class="topbar-mid">
+          <div class="conn" id="conn">
+            <span class="conn-dot" id="conn-dot"></span>
+            <span id="conn-label">CONNECTING…</span>
+          </div>
+          <div class="svc" id="svc">
+            <span class="svc-label">ORCHESTRATOR</span>
+            <span class="svc-value" id="svc-value">—</span>
+          </div>
+        </div>
+        <div class="top-actions">
+          <time class="clock" id="clock">00:00:00</time>
+          <button id="focus-btn" class="ghost-btn" aria-pressed="false">⛶ FOCUS</button>
+        </div>
+      </header>
+
+      <aside class="left-rail">
+        <section class="voice-control-panel panel instrument" style="--assemble-delay:0s">
+          <div class="log-head"><span>VOICE CONTROL</span></div>
+          <div class="control-row">
+            <button id="activate-btn" class="voice-btn voice-btn-primary" title="Wake Jarvis, same as a clap or spacebar hold">ACTIVATE</button>
+          </div>
+          <div class="control-row">
+            <button id="interrupt-btn" class="voice-btn" title="Stop Jarvis talking and start listening">INTERRUPT</button>
+            <button id="keep-listening-btn" class="voice-btn" title="I'm not finished — don't cut off listening">KEEP LISTENING</button>
+          </div>
+        </section>
+
+        <!-- Talks straight to jarvis_respond.py on the server (see
+             mobile-bridge.js's chat()) — never touches always_on.py or
+             the Mac at all, so this is the one thing here that keeps
+             working with the Mac fully powered off. -->
+        <section class="chat-panel panel instrument" style="--assemble-delay:.02s">
+          <div class="log-head"><span>REMOTE CHAT</span></div>
+          <div class="chat-history" id="chat-history">
+            <div class="chat-hint">Works even if your Mac is off — talks straight to the server.</div>
+          </div>
+          <form id="chat-form" class="chat-input-row">
+            <input type="text" id="chat-input" autocomplete="off" placeholder="ask jarvis anything…" />
+            <button type="submit" id="chat-send">SEND</button>
+          </form>
+        </section>
+
+        <button id="mobile-more-btn" class="ghost-btn mobile-more-toggle" aria-pressed="false">▼ MORE</button>
+
+        <section class="core-control-panel panel instrument mobile-extra" style="--assemble-delay:.04s">
+          <div class="log-head"><span>CORE CONTROL</span></div>
+          <div class="control-row">
+            <button class="mode-btn" data-mode="orbital">ORBITAL</button>
+            <button class="mode-btn" data-mode="neural">NEURAL</button>
+            <button class="mode-btn" data-mode="lattice">LATTICE</button>
+          </div>
+          <div class="control-row">
+            <button class="swatch" data-color="#79edff" style="--sw:#79edff" title="Ion blue"></button>
+            <button class="swatch" data-color="#ff9c42" style="--sw:#ff9c42" title="Solar amber"></button>
+            <button class="swatch" data-color="#bc9aff" style="--sw:#bc9aff" title="Ultraviolet"></button>
+            <button class="swatch" data-color="#e8f8ff" style="--sw:#e8f8ff" title="Ghost white"></button>
+            <button id="auto-btn" class="ghost-btn" title="Resume automatic mode/color/energy">AUTO</button>
+          </div>
+          <div class="control-row slider-row">
+            <label for="energy-slider">ENERGY <output id="energy-value">55%</output></label>
+            <input type="range" id="energy-slider" min="0" max="100" value="55" />
+          </div>
+          <div class="control-row slider-row">
+            <label for="expansion-slider">EXPANSION <output id="expansion-value">12%</output></label>
+            <input type="range" id="expansion-slider" min="0" max="100" value="12" />
+          </div>
+        </section>
+
+        <section class="routing-panel panel instrument mobile-extra" style="--assemble-delay:.1s">
+          <div class="log-head">
+            <span>ORCHESTRATION — LIVE ROUTE</span>
+          </div>
+          <div class="route-flow" id="route-flow">
+            <div class="route-node" id="node-mac">
+              <div class="route-node-label">MAC</div>
+              <div class="route-node-sub">voice I/O</div>
+            </div>
+            <div class="route-arrow" id="arrow-mac-local">
+              <div class="route-node route-node-sm" id="node-local">
+                <div class="route-node-label">LOCAL</div>
+                <div class="route-node-sub">Claude · this Mac</div>
+              </div>
+            </div>
+            <div class="route-arrow" id="arrow-mac-server">→</div>
+            <div class="route-node" id="node-server">
+              <div class="route-node-label">ORACLE SERVER</div>
+              <div class="route-node-sub">jarvis_respond.py</div>
+            </div>
+            <div class="route-branches">
+              <div class="route-node route-node-sm" id="node-lookup">
+                <div class="route-node-label">LOOKUP</div>
+                <div class="route-node-sub">Ollama · facts</div>
+              </div>
+              <div class="route-node route-node-sm" id="node-fast">
+                <div class="route-node-label">FAST</div>
+                <div class="route-node-sub">Groq</div>
+              </div>
+              <div class="route-node route-node-sm" id="node-cloud">
+                <div class="route-node-label">CLOUD</div>
+                <div class="route-node-sub">Claude · reasoning</div>
+              </div>
+            </div>
+          </div>
+          <div class="route-current">
+            <span class="route-current-label" id="route-current-label">No routing activity yet</span>
+            <span class="route-current-detail" id="route-current-detail"></span>
+            <span class="route-current-age" id="route-current-age"></span>
+          </div>
+        </section>
+
+        <section class="ring-stats-panel panel instrument mobile-extra" style="--assemble-delay:.18s">
+          <div class="ring-stats-row">
+            <div class="ring-wrap">
+              <svg viewBox="0 0 220 220" class="ring">
+                <circle cx="110" cy="110" r="95" class="ring-track" />
+                <circle cx="110" cy="110" r="95" class="ring-seg seg-done" id="seg-done" />
+                <circle cx="110" cy="110" r="95" class="ring-seg seg-running" id="seg-running" />
+                <circle cx="110" cy="110" r="95" class="ring-seg seg-failed" id="seg-failed" />
+                <circle cx="110" cy="110" r="72" class="ring-inner" />
+              </svg>
+              <div class="ring-center">
+                <div class="ring-total" id="ring-total">0</div>
+                <div class="ring-total-label">TASKS</div>
+              </div>
+            </div>
+            <div class="stat-grid">
+              <div class="stat-card" data-kind="done">
+                <div class="stat-label">DONE</div>
+                <div class="stat-value" id="count-done">0</div>
+              </div>
+              <div class="stat-card" data-kind="running">
+                <div class="stat-label">RUNNING</div>
+                <div class="stat-value" id="count-running">0</div>
+              </div>
+              <div class="stat-card" data-kind="failed">
+                <div class="stat-label">FAILED</div>
+                <div class="stat-value" id="count-failed">0</div>
+              </div>
+            </div>
+          </div>
+          <div class="rail-title">ACTIVE SESSIONS</div>
+          <div class="worker-bars" id="worker-bars"></div>
+        </section>
+      </aside>
+
+      <aside class="right-rail">
+        <section class="log-panel panel instrument mobile-extra" style="--assemble-delay:.14s">
+          <div class="log-head">
+            <span>BACKGROUND TASKS</span>
+            <div class="log-actions">
+              <span class="last-sync" id="last-sync">never synced</span>
+              <button id="refresh-btn" class="ghost-btn">REFRESH</button>
+            </div>
+          </div>
+          <div class="task-list-wrap">
+            <div class="task-list" id="log-body">
+              <div class="empty-row">Waiting for first sync…</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="log-panel projects-panel panel instrument mobile-extra" style="--assemble-delay:.24s">
+          <div class="log-head">
+            <span>PROJECT LOG — PERMANENT RECORD</span>
+          </div>
+          <pre class="projects-log" id="projects-log">Waiting for first sync…</pre>
+        </section>
+      </aside>
+
+      <div class="error-banner" id="error-banner"></div>
+    </main>
+  </body>
+</html>

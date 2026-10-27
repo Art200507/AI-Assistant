@@ -1,173 +1,185 @@
-import * as THREE from "three";
+import { createHologram } from "./hologram.js";
 
-const STATE_COLOR = {
-  idle: new THREE.Color(0x4fd8ff),
-  listening: new THREE.Color(0x9be9ff),
-  thinking: new THREE.Color(0xffc15c),
-  speaking: new THREE.Color(0xaef6ff),
+// Routing tier -> hologram color, reusing the prototype's own spectrum
+// names/values (jarvis-interface's color swatches) so "what tier is
+// active" has a real, distinct visual identity instead of one flat color:
+// cyan for the fast tier (its default), violet for cloud/Claude reasoning
+// (set apart as the "heavier" tier), amber for local Claude (warm = this
+// machine, not the server), white for plain grounded lookups.
+export const ROUTE_COLOR = {
+  simple: "#79edff",
+  reasoning: "#bc9aff",
+  local: "#ff9c42",
+  lookup: "#e8f8ff",
 };
 
-const STATE_RING_SPEED = {
-  idle: 0.15,
-  listening: 0.4,
-  thinking: 0.9,
+// Voice state -> hologram mode. Orbital is the calm default; neural (a
+// connected particle field) reads as "actively processing", which is
+// exactly what thinking/speaking are — lattice (rigid structural
+// geometry) never fit any real JARVIS state on its own, which is why it's
+// only reachable manually (see setManualMode) rather than auto-driven.
+const STATE_MODE = {
+  idle: "orbital",
+  listening: "orbital",
+  thinking: "neural",
+  speaking: "neural",
+};
+
+// Baseline energy per voice state, same idea as the old avatar.js's
+// per-state wobble amplitude. Speaking adds the real mic/TTS amplitude
+// on top (see setState) instead of using a flat number.
+const STATE_ENERGY = {
+  idle: 0.35,
+  listening: 0.55,
+  thinking: 0.75,
   speaking: 0.6,
 };
 
-export function createAvatar(canvas) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+export function createAvatar(container) {
+  const engine = createHologram(container, {});
+  engine.state.auto = true;
+  engine.state.motion = true;
 
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
-  camera.position.set(0, 0, 4.2);
-
-  // --- core: deformable wireframe icosphere ---
-  const coreGeo = new THREE.IcosahedronGeometry(1, 4);
-  const posAttr = coreGeo.attributes.position;
-  const basePositions = Float32Array.from(posAttr.array);
-  const vertexPhase = new Float32Array(posAttr.count);
-  for (let i = 0; i < vertexPhase.length; i++) vertexPhase[i] = Math.random() * Math.PI * 2;
-
-  const coreMat = new THREE.MeshBasicMaterial({
-    color: STATE_COLOR.idle,
-    wireframe: true,
-    transparent: true,
-    opacity: 0.85,
-  });
-  const core = new THREE.Mesh(coreGeo, coreMat);
-  scene.add(core);
-
-  // --- inner glow sphere ---
-  const glowGeo = new THREE.SphereGeometry(0.55, 24, 24);
-  const glowMat = new THREE.MeshBasicMaterial({
-    color: STATE_COLOR.idle,
-    transparent: true,
-    opacity: 0.35,
-  });
-  const glow = new THREE.Mesh(glowGeo, glowMat);
-  scene.add(glow);
-
-  // --- HUD rings (gyroscope style) ---
-  const ringGroup = new THREE.Group();
-  const ringDefs = [
-    { r: 1.55, tube: 0.012, tiltX: Math.PI / 2.3, tiltY: 0.2, speed: 1 },
-    { r: 1.75, tube: 0.008, tiltX: 0.4, tiltY: Math.PI / 2.6, speed: -0.7 },
-    { r: 1.95, tube: 0.006, tiltX: 1.1, tiltY: 0.9, speed: 0.5 },
-  ];
-  const rings = ringDefs.map((def) => {
-    const geo = new THREE.TorusGeometry(def.r, def.tube, 8, 96);
-    const mat = new THREE.MeshBasicMaterial({
-      color: STATE_COLOR.idle,
-      transparent: true,
-      opacity: 0.5,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.rotation.x = def.tiltX;
-    mesh.rotation.y = def.tiltY;
-    mesh.userData.speed = def.speed;
-    ringGroup.add(mesh);
-    return mesh;
-  });
-  scene.add(ringGroup);
-
-  // --- particle shell ---
-  const N = 500;
-  const shellGeo = new THREE.BufferGeometry();
-  const shellPos = new Float32Array(N * 3);
-  for (let i = 0; i < N; i++) {
-    const r = 2.15 + Math.random() * 0.15;
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    shellPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-    shellPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-    shellPos[i * 3 + 2] = r * Math.cos(phi);
-  }
-  shellGeo.setAttribute("position", new THREE.BufferAttribute(shellPos, 3));
-  const shellMat = new THREE.PointsMaterial({
-    color: STATE_COLOR.idle,
-    size: 0.02,
-    transparent: true,
-    opacity: 0.55,
-  });
-  const shell = new THREE.Points(shellGeo, shellMat);
-  scene.add(shell);
+  // Drag-to-rotate — engine.drag()/cursor()/clearCursor() were already in
+  // hologram.js (ported along with everything else, just never wired to
+  // real pointer events since the Dashboard started as a passive status
+  // display). Ported from the prototype's own app.js pointer handlers,
+  // same math, just attached to this container instead of its #scene div.
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  const onPointerDown = (e) => {
+    dragging = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    container.setPointerCapture(e.pointerId);
+    container.style.cursor = "grabbing";
+  };
+  const onPointerMove = (e) => {
+    if (!dragging) return;
+    engine.drag(e.clientX - lastX, e.clientY - lastY);
+    lastX = e.clientX;
+    lastY = e.clientY;
+  };
+  const onPointerUp = () => {
+    dragging = false;
+    container.style.cursor = "grab";
+  };
+  const onPointerLeave = () => {
+    if (!dragging) engine.clearCursor();
+  };
+  container.style.cursor = "grab";
+  container.addEventListener("pointerdown", onPointerDown);
+  container.addEventListener("pointermove", onPointerMove);
+  container.addEventListener("pointerup", onPointerUp);
+  container.addEventListener("pointercancel", onPointerUp);
+  container.addEventListener("pointerleave", onPointerLeave);
 
   let currentState = "idle";
-  let targetAmplitude = 0;
-  let smoothedAmplitude = 0;
-  let lastStateChangeTime = performance.now();
-  let elapsed = 0;
-  let lastFrameTime = performance.now();
-
-  function resize() {
-    const parent = canvas.parentElement;
-    const w = parent.clientWidth;
-    const h = parent.clientHeight;
-    renderer.setSize(w, h, false);
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-  }
-  window.addEventListener("resize", resize);
-  resize();
+  let targetEnergy = STATE_ENERGY.idle;
+  let currentRoute = null;
+  let rafId = null;
+  // Manual mode/color picks (the new CORE CONTROL panel) pin that one
+  // dimension so the automatic voice-state/routing drivers stop touching
+  // it, without disabling the other dimension's automatic behavior —
+  // picking a color manually shouldn't also freeze the mode, and vice
+  // versa. clearOverrides() (the AUTO button) releases both at once.
+  let modeOverride = null;
+  let colorOverride = null;
+  let energyOverride = null;
 
   function setState(state, amplitude = 0) {
     if (state !== currentState) {
       currentState = state;
-      lastStateChangeTime = performance.now();
+      engine.state.listening = state === "listening";
+      if (!modeOverride) engine.setMode(STATE_MODE[state] || "orbital");
+      if (state === "thinking" || state === "speaking") engine.burst(0.5);
     }
-    targetAmplitude = amplitude;
+    if (energyOverride === null) {
+      const base = STATE_ENERGY[state] ?? STATE_ENERGY.idle;
+      targetEnergy = state === "speaking" ? base + amplitude * 0.6 : base;
+    }
   }
 
-  function animate() {
-    requestAnimationFrame(animate);
-    const now = performance.now();
-    const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
-    lastFrameTime = now;
-    elapsed += dt;
-    const t = elapsed;
-
-    smoothedAmplitude += (targetAmplitude - smoothedAmplitude) * Math.min(1, dt * 8);
-
-    const color = STATE_COLOR[currentState] || STATE_COLOR.idle;
-    coreMat.color.lerp(color, 0.08);
-    glowMat.color.lerp(color, 0.08);
-    shellMat.color.lerp(color, 0.08);
-    for (const r of rings) r.material.color.lerp(color, 0.08);
-
-    // breathing / speaking deformation on the core
-    const baseAmp = currentState === "speaking" ? smoothedAmplitude : currentState === "listening" ? 0.25 : currentState === "thinking" ? 0.18 : 0.08;
-    const positions = coreGeo.attributes.position.array;
-    for (let i = 0; i < vertexPhase.length; i++) {
-      const idx = i * 3;
-      const bx = basePositions[idx];
-      const by = basePositions[idx + 1];
-      const bz = basePositions[idx + 2];
-      const len = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
-      const nx = bx / len, ny = by / len, nz = bz / len;
-      const wobble = Math.sin(t * (currentState === "thinking" ? 6 : 2.2) + vertexPhase[i]) * baseAmp * 0.18;
-      positions[idx] = bx + nx * wobble;
-      positions[idx + 1] = by + ny * wobble;
-      positions[idx + 2] = bz + nz * wobble;
+  // Tier actually changed -> a scan sweep is a real, literal "routing
+  // decision just happened" signal, not a decorative effect; reusing the
+  // prototype's own scan() rather than inventing a second one. Still
+  // scans on a tier change even under a color override, since the scan
+  // itself carries real information independent of what color is showing.
+  function setRouting(tier) {
+    if (!tier || tier === currentRoute) return;
+    currentRoute = tier;
+    if (!colorOverride) {
+      const hex = ROUTE_COLOR[tier];
+      if (hex) engine.setColor(hex);
     }
-    coreGeo.attributes.position.needsUpdate = true;
-
-    const pulseScale = 1 + Math.sin(t * 1.6) * 0.03 + smoothedAmplitude * 0.12;
-    glow.scale.setScalar(pulseScale);
-    glowMat.opacity = 0.28 + smoothedAmplitude * 0.35;
-
-    core.rotation.y += dt * 0.12;
-    core.rotation.x += dt * 0.05;
-
-    const ringSpeed = STATE_RING_SPEED[currentState] || 0.2;
-    for (const r of rings) {
-      r.rotation.z += dt * ringSpeed * r.userData.speed * (1 + smoothedAmplitude);
-    }
-    shell.rotation.y += dt * 0.03;
-
-    renderer.render(scene, camera);
+    engine.scan();
   }
-  animate();
 
-  return { setState, resize };
+  function setManualMode(mode) {
+    modeOverride = mode;
+    engine.setMode(mode);
+  }
+
+  function setManualColor(hex) {
+    colorOverride = hex;
+    engine.setColor(hex);
+  }
+
+  // Expansion has no automatic driver to fight (nothing in setState/
+  // setRouting ever touches it), so unlike mode/color it needs no
+  // override flag — the slider can just call engine.expand() directly.
+  function setManualExpansion(v) {
+    engine.expand(v);
+  }
+
+  function setManualEnergy(v) {
+    energyOverride = v;
+    engine.state.energy = v;
+  }
+
+  function clearOverrides() {
+    modeOverride = null;
+    colorOverride = null;
+    energyOverride = null;
+    engine.setMode(STATE_MODE[currentState] || "orbital");
+    if (currentRoute && ROUTE_COLOR[currentRoute]) engine.setColor(ROUTE_COLOR[currentRoute]);
+    engine.expand(0.12);
+  }
+
+  function tick() {
+    if (energyOverride === null) {
+      engine.state.energy += (targetEnergy - engine.state.energy) * 0.12;
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+  tick();
+
+  function resize() {
+    // createHologram observes `container` with its own ResizeObserver —
+    // nothing to do here. Kept as a no-op so main.js's existing call
+    // shape (if it ever resizes explicitly) doesn't break.
+  }
+
+  function dispose() {
+    if (rafId) cancelAnimationFrame(rafId);
+    container.removeEventListener("pointerdown", onPointerDown);
+    container.removeEventListener("pointermove", onPointerMove);
+    container.removeEventListener("pointerup", onPointerUp);
+    container.removeEventListener("pointercancel", onPointerUp);
+    container.removeEventListener("pointerleave", onPointerLeave);
+    engine.dispose();
+  }
+
+  return {
+    setState,
+    setRouting,
+    setManualMode,
+    setManualColor,
+    setManualExpansion,
+    setManualEnergy,
+    clearOverrides,
+    resize,
+    dispose,
+  };
 }

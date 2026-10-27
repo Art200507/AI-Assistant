@@ -1,39 +1,60 @@
-"""Twilio inbound/outbound call handling — SCAFFOLD ONLY.
+"""Twilio inbound/outbound call handling — runs on the ORACLE SERVER, not
+the Mac (user's explicit choice: always reachable even if the Mac is
+asleep, and talks to jarvis_respond.py directly instead of hopping back
+over SSH to itself). Deployed to ~/JARVIS/phone/ on the server; this local
+copy is the source of truth, kept in sync by hand the same way
+jarvis_respond.py itself is (edit locally, scp + py_compile + move into
+place — see STATUS.md for the established deploy pattern).
 
-This does not start listening until you run it explicitly, and running it
-does nothing useful until phone/.env has real Twilio credentials (config.py
-refuses to proceed otherwise). No signup was performed on your behalf, and
-this file does not bind to anything but 127.0.0.1 — reaching it from Twilio
-requires you to run a tunnel (ngrok) yourself, which is also not done here.
+SCAFFOLD, still inert: does not start listening until run explicitly, and
+running it does nothing useful until phone/.env has real Twilio
+credentials (config.py refuses to proceed otherwise — see
+config.require_configured()). No signup performed on the user's behalf.
+
+Binds to 0.0.0.0 (not just localhost) because this now needs to be
+reachable from the public internet on the Oracle server — reaching it
+requires the server's firewall/security-group to actually allow inbound
+traffic on LISTEN_PORT, which is a separate, deliberate step (not done by
+importing this file) since it's the one piece that changes this server's
+public attack surface. Do that only once real Twilio credentials are in
+place, so a half-configured public webhook is never sitting open.
 
 Call flow once activated:
-  1. Twilio hits POST /voice when your number receives a call.
-  2. We check the caller is JARVIS_OWNER_PHONE_NUMBER (reject anyone else).
+  1. Twilio hits POST /voice when the owner's number receives a call.
+  2. Caller is checked against JARVIS_OWNER_PHONE_NUMBER (reject anyone
+     else) and the request signature is checked against TWILIO_AUTH_TOKEN
+     (reject anything not actually sent by Twilio).
   3. <Gather input="speech"> records and transcribes the caller's speech
-     using Twilio's own STT (not whisper.cpp — Twilio needs the transcript
-     before it can call back into our webhook, so this one leg uses their
-     speech recognition rather than the local pipeline).
-  4. POST /voice/process receives the transcript, forwards it to the same
-     jarvis_client.ask_jarvis() the voice/ pipeline uses (SSH -> server's
-     jarvis_respond.py), and speaks the answer back with Twilio's <Say>
-     (Polly.Brian — a British neural voice, closest match to the local
-     Piper British voice without needing to host audio files publicly).
+     using Twilio's own STT (not Groq/whisper — Twilio needs the
+     transcript before it can call back into this webhook, so this one
+     leg uses their speech recognition rather than the local pipeline).
+  4. POST /voice/process receives the transcript and calls
+     jarvis_respond.respond() DIRECTLY (no SSH — this server IS where
+     jarvis_respond.py already lives), using the call's own CallSid as
+     the session_id so a single phone call has real continuous memory
+     turn-to-turn, then speaks the answer back with Twilio's <Say>
+     (Polly.Brian — closest match to the local Piper British voice
+     without needing to host audio files publicly).
+
+Scope: fast + cloud tiers only, no local-Claude-on-Mac — the Mac isn't
+guaranteed to be awake when a call comes in, which is the whole reason
+this runs on the always-on server instead.
 """
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "voice"))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # jarvis_respond.py's directory
 
 from flask import Flask, request, Response
 from twilio.request_validator import RequestValidator
 from twilio.twiml.voice_response import VoiceResponse, Gather
 
 import config
-from jarvis_client import ask_jarvis  # noqa: E402  (path insert above must run first)
+import jarvis_respond as jr  # noqa: E402  (path insert above must run first)
 
 app = Flask(__name__)
 
-LISTEN_HOST = "127.0.0.1"  # localhost only — a tunnel (ngrok) is required to expose this, and that's on you
+LISTEN_HOST = "0.0.0.0"  # public — see module docstring on the firewall step
 LISTEN_PORT = 5005
 
 
@@ -80,9 +101,17 @@ def voice_process():
         return Response(status=403)
 
     speech_text = request.form.get("SpeechResult", "")
+    # CallSid is unique per call and stable across all turns of that same
+    # call — using it as the session_id gives a phone call real
+    # turn-to-turn memory via the same shared-transcript mechanism the
+    # voice/ pipeline uses, instead of every turn starting fresh.
+    call_sid = request.form.get("CallSid", "")
     resp = VoiceResponse()
 
-    answer = ask_jarvis(speech_text) if speech_text else "I didn't catch that."
+    if speech_text:
+        answer = jr.respond(speech_text, session_id=call_sid or None)
+    else:
+        answer = "I didn't catch that."
     resp.say(answer, voice="Polly.Brian")
 
     # Offer another turn instead of hanging up immediately.
@@ -100,6 +129,6 @@ def voice_process():
 
 if __name__ == "__main__":
     config.require_configured()
-    print(f"Starting Twilio webhook server on {LISTEN_HOST}:{LISTEN_PORT} (localhost only).")
-    print("Twilio cannot reach this until you point a public tunnel (e.g. ngrok) at it — see phone/.env.example.")
+    print(f"Starting Twilio webhook server on {LISTEN_HOST}:{LISTEN_PORT}.")
+    print("Make sure the server's firewall actually allows inbound traffic on this port.")
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, debug=False)

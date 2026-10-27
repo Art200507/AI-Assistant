@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -36,8 +37,10 @@ PIPER_MODEL = os.environ.get(
 # model's natural default. Started at 0.85 (moderate speedup) rather than
 # jumping straight to the fastest tested value — same lesson as the macOS
 # say rate earlier tonight (195wpm was too fast, 178 was right); better to
-# undershoot first and get feedback than overshoot.
-PIPER_LENGTH_SCALE = os.environ.get("JARVIS_PIPER_LENGTH_SCALE", "0.85")
+# undershoot first and get feedback than overshoot. User asked for faster
+# again — moving to 0.78, another real step rather than guessing at the
+# final value in one jump.
+PIPER_LENGTH_SCALE = os.environ.get("JARVIS_PIPER_LENGTH_SCALE", "0.78")
 
 # TTS engine: "piper" (default) — measured ~0.72s synthesis for a short
 # sentence, vs Kokoro's ~2.73s (same sentence, same machine) and macOS
@@ -98,6 +101,50 @@ def _validate_say_voice():
 
 _validate_say_voice()  # runs on import so both this script and always_on.py get the check
 
+# Piper's voice model files vanish periodically — confirmed twice now,
+# same pattern both times: the large .onnx weight file (~63MB) gone,
+# only its tiny .json config (~5KB) surviving. Real root cause found the
+# second time it happened, not guessed: this Mac's disk was at 99%
+# capacity (~2.9GB free) when it recurred — macOS reclaims space from
+# large, less-recently-used files under that kind of pressure, which
+# fits this exact pattern far better than "corrupted download." The
+# round-21 fix (retry + fall back to macOS `say`) keeps a single missing
+# file from crashing the whole process, but silently degrading the
+# entire session's voice to the wrong engine isn't a good outcome either
+# — this check repairs it BEFORE any conversation starts, not mid-turn.
+_MIN_VALID_MODEL_BYTES = 1_000_000  # real file is ~63MB; a few KB means it's gone
+
+
+def _ensure_piper_model():
+    if TTS_ENGINE != "piper":
+        return
+    model_path = Path(PIPER_MODEL)
+    if model_path.exists() and model_path.stat().st_size >= _MIN_VALID_MODEL_BYTES:
+        return
+    print(f"⚠️  Piper voice model missing or truncated at {model_path} — re-downloading...")
+    voice_name = model_path.stem  # e.g. "en_GB-alan-medium" from the .onnx filename
+    try:
+        # --force-redownload is load-bearing, not optional: verified live
+        # that without it, download_voices sees a file already present at
+        # the target path (even a truncated/corrupt one, which is exactly
+        # this situation) and silently skips re-fetching it — it prints
+        # "Downloaded: ..." either way, so that message alone doesn't
+        # mean it actually did anything.
+        subprocess.run(
+            [sys.executable, "-m", "piper.download_voices", "--force-redownload",
+             "--download-dir", str(model_path.parent), voice_name],
+            capture_output=True, text=True, timeout=120,
+        )
+        if model_path.exists() and model_path.stat().st_size >= _MIN_VALID_MODEL_BYTES:
+            print(f"   Restored ({model_path.stat().st_size // 1_000_000}MB).")
+        else:
+            print("   Re-download didn't produce a valid file — Piper will keep falling back to `say` until this is fixed.")
+    except Exception as e:
+        print(f"   Re-download failed ({e}) — Piper will keep falling back to `say` until this is fixed.")
+
+
+_ensure_piper_model()  # runs on import, same as the say-voice check above
+
 
 def record_until_enter(out_wav: str):
     print("Recording… press Enter to stop.")
@@ -129,8 +176,55 @@ WHISPER_PROMPT = os.environ.get(
 )
 
 
-def transcribe(wav_path: str) -> str:
-    write_state("thinking", 0.2)
+def _load_key_file(env_var, filename):
+    """Same convention as jarvis_respond.py on the server: env var wins,
+    else a plain owner-only-permission file in the home dir, never in git."""
+    env_key = os.environ.get(env_var)
+    if env_key:
+        return env_key
+    key_file = Path.home() / filename
+    if key_file.exists():
+        return key_file.read_text().strip()
+    return None
+
+
+# STT engine: "groq" (default) uses Groq's hosted whisper-large-v3-turbo —
+# switched from local-only after user reported repeated real mishearings
+# ("Claude" -> "Cola", "Jarvis" -> "Chavez"/"Jorvis") with base.en. Measured
+# real latency before switching, not assumed: Groq's API took 0.33-0.62s on
+# a ~5s test sentence vs 0.29-0.44s local whisper-cli on the same clip —
+# a wash, not a win, so this is purely an accuracy bet on the much bigger
+# model, not a speed one. "whisper" keeps the fully local/offline path
+# available, and is also the automatic fallback if the Groq API call fails
+# for any reason (no key, network down, bad response) — voice should never
+# fully break just because one network call did.
+STT_ENGINE = os.environ.get("JARVIS_STT_ENGINE", "groq")
+GROQ_STT_API_KEY = _load_key_file("GROQ_API_KEY", ".jarvis_groq_key")
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
+
+
+def _transcribe_groq(wav_path: str):
+    """Returns transcript text, or None on any failure (caller falls back
+    to local whisper-cli rather than surfacing a broken turn)."""
+    import requests
+    try:
+        with open(wav_path, "rb") as f:
+            resp = requests.post(
+                GROQ_STT_URL,
+                headers={"Authorization": f"Bearer {GROQ_STT_API_KEY}"},
+                files={"file": ("audio.wav", f, "audio/wav")},
+                data={"model": GROQ_STT_MODEL, "response_format": "text"},
+                timeout=15,
+            )
+        if resp.status_code != 200:
+            return None
+        return resp.text.strip()
+    except Exception:
+        return None
+
+
+def _transcribe_local(wav_path: str) -> str:
     result = subprocess.run(
         [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav_path, "-nt", "-np", "--prompt", WHISPER_PROMPT],
         capture_output=True,
@@ -143,6 +237,16 @@ def transcribe(wav_path: str) -> str:
         if l.strip() and not l.startswith(("whisper_", "ggml_", "main:", "system_info", "load_backend", "read_audio_data"))
     ]
     return " ".join(lines).strip()
+
+
+def transcribe(wav_path: str) -> str:
+    write_state("thinking", 0.2)
+    if STT_ENGINE == "groq" and GROQ_STT_API_KEY:
+        result = _transcribe_groq(wav_path)
+        if result is not None:
+            return result
+        print("(Groq STT failed — falling back to local whisper for this turn)")
+    return _transcribe_local(wav_path)
 
 
 def _amplitude_envelope(wav_path: str, chunk_ms: int = CHUNK_MS):
@@ -166,31 +270,82 @@ def _amplitude_envelope(wav_path: str, chunk_ms: int = CHUNK_MS):
     return envelope
 
 
-def _synthesize(text: str, out_wav: str):
-    if TTS_ENGINE == "kokoro":
-        import soundfile as sf
-        kokoro = _get_kokoro()
-        samples, sr = kokoro.create(text, voice=KOKORO_VOICE, speed=1.0, lang="en-us")
-        sf.write(out_wav, samples, sr)
-    elif TTS_ENGINE == "piper":
-        subprocess.run(
-            [PIPER_BIN, "-m", PIPER_MODEL, "--length-scale", PIPER_LENGTH_SCALE, "-f", out_wav],
-            input=text,
-            text=True,
-            capture_output=True,
-            timeout=60,
-        )
-    else:
+# A real WAV header alone is 44 bytes — anything smaller is structurally
+# broken, not just quiet. Live crash: Piper produced an invalid/empty
+# file for a wake-ack phrase, capture_output swallowed whatever error it
+# hit, and the first anyone found out was wave.open() raising a bare
+# EOFError three calls away in _amplitude_envelope — an uncaught
+# exception that took down the entire always_on.py process. Every other
+# subsystem here (STT, Claude session resume, Groq->Claude escalation)
+# degrades a single turn on failure instead of crashing the process;
+# TTS synthesis was the one place that never got that treatment.
+_MIN_VALID_WAV_BYTES = 100
+
+
+def _is_valid_wav(path: str) -> bool:
+    try:
+        if Path(path).stat().st_size < _MIN_VALID_WAV_BYTES:
+            return False
+        with wave.open(path, "rb") as wf:
+            return wf.getnframes() > 0
+    except Exception:
+        return False
+
+
+def _synthesize_say_fallback(text: str, out_wav: str):
+    try:
         subprocess.run(
             [
                 "say", "-v", SAY_VOICE, "-r", SAY_RATE, "-o", out_wav,
                 "--file-format=WAVE", f"--data-format=LEI16@{SAY_SAMPLE_RATE}",
                 text,
             ],
-            capture_output=True,
-            text=True,
-            timeout=60,
+            capture_output=True, text=True, timeout=60,
         )
+    except Exception:
+        pass
+
+
+def _synthesize_once(text: str, out_wav: str):
+    if TTS_ENGINE == "kokoro":
+        try:
+            import soundfile as sf
+            kokoro = _get_kokoro()
+            samples, sr = kokoro.create(text, voice=KOKORO_VOICE, speed=1.0, lang="en-us")
+            sf.write(out_wav, samples, sr)
+        except Exception:
+            pass
+    elif TTS_ENGINE == "piper":
+        try:
+            subprocess.run(
+                [PIPER_BIN, "-m", PIPER_MODEL, "--length-scale", PIPER_LENGTH_SCALE, "-f", out_wav],
+                input=text,
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+        except Exception:
+            pass
+    else:
+        _synthesize_say_fallback(text, out_wav)
+
+
+def _synthesize(text: str, out_wav: str):
+    """Never leaves out_wav missing/invalid for the caller to choke on —
+    retries the configured engine once (transient failures happen), then
+    falls back to macOS `say` (simplest, most reliable engine, always
+    available) rather than ever propagating a synthesis failure as an
+    uncaught exception deep in playback code."""
+    _synthesize_once(text, out_wav)
+    if _is_valid_wav(out_wav):
+        return
+    print(f"(TTS synthesis failed for {TTS_ENGINE!r}, retrying once...)")
+    _synthesize_once(text, out_wav)
+    if _is_valid_wav(out_wav):
+        return
+    if TTS_ENGINE != "macos":
+        print("(TTS retry also failed — falling back to macOS say for this sentence)")
+        _synthesize_say_fallback(text, out_wav)
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -209,6 +364,14 @@ def _synthesize_to_temp(text: str) -> str:
 
 
 def _play_wav_with_avatar_sync(wav_path: str, interrupt_event=None):
+    # Last line of defense: _synthesize already retries + falls back to
+    # `say`, but if even that somehow produced nothing playable (e.g.
+    # disk full), skip silently rather than let wave.open() raise
+    # uncaught here and take the whole process down with it — a missed
+    # sentence is a far smaller failure than a crashed assistant.
+    if not _is_valid_wav(wav_path):
+        print(f"(skipping unplayable audio: {wav_path})")
+        return
     envelope = _amplitude_envelope(wav_path)
     player = subprocess.Popen(["afplay", wav_path])
     for amp in envelope:
@@ -239,8 +402,17 @@ def speak(text: str, interrupt_event=None):
 
     sentences = _split_sentences(text)
     executor = ThreadPoolExecutor(max_workers=1)
+    # Futures whose WAV hasn't been played+unlinked yet. An interruption
+    # can abandon a sentence still synthesizing in the background (break
+    # happens before its future is ever awaited) — executor.shutdown(wait=
+    # False) below doesn't cancel that in-flight work, it just keeps
+    # running unawaited, and its delete=False temp WAV used to never get
+    # cleaned up at all. Tracked here so the finally block can still
+    # clean each one up once it actually finishes.
+    pending = []
     try:
         future = executor.submit(_synthesize_to_temp, sentences[0])
+        pending.append(future)
         for i in range(len(sentences)):
             if interrupt_event is not None and interrupt_event.is_set():
                 break
@@ -250,16 +422,26 @@ def speak(text: str, interrupt_event=None):
                 if i + 1 < len(sentences)
                 else None
             )
+            if next_future is not None:
+                pending.append(next_future)
             try:
                 _play_wav_with_avatar_sync(wav_path, interrupt_event=interrupt_event)
             finally:
                 Path(wav_path).unlink(missing_ok=True)
+            pending.remove(future)
             if interrupt_event is not None and interrupt_event.is_set():
                 break
             future = next_future
     finally:
         write_state("idle", 0.0)
         executor.shutdown(wait=False)
+        for f in pending:
+            def _cleanup_abandoned(f=f):
+                try:
+                    Path(f.result()).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            threading.Thread(target=_cleanup_abandoned, daemon=True).start()
 
 
 def run_once():
