@@ -28,6 +28,7 @@ turns each one into a standalone imperative rule ("never do X — user
 corrected this on <date>"), not vague prose lessons that are easy to
 compress away = actual likely to change future behavior.
 """
+import fcntl
 import json
 import re
 import subprocess
@@ -55,6 +56,20 @@ LEARNING_LOG = HERE.parent / "learning_log.md"
 # process restarts) so reflection is idempotent no matter how many times
 # or from where it's triggered.
 REFLECTION_WATERMARK_FILE = HERE.parent / ".last_reflected_ts"
+
+# _trigger_session_reflection (always_on.py) always launches this as a
+# DETACHED OS PROCESS — never synchronously — and fires it both at
+# conversation-end and again as a shutdown safety net. A user quitting
+# moments after a conversation ends (very normal) can start a second
+# reflect_on_session process while the first one's ~10-120s model call
+# is still running — a real race, not a rare one: both processes read
+# the same stale watermark before either writes it back, so the
+# watermark alone doesn't prevent a duplicate. flock blocks the second
+# process until the first releases (by which point the watermark it was
+# about to re-check has already moved), and releases automatically if
+# the holding process dies for any reason — no stale-lock cleanup code
+# needed for a detached process you can't easily signal.
+REFLECTION_LOCK_FILE = HERE.parent / ".reflection.lock"
 
 
 def _load_reflection_watermark() -> float:
@@ -124,8 +139,18 @@ def _session_entries(since_ts: float):
 def _format_entries(entries):
     out = []
     for e in entries:
-        if e.get("type") == "file_fix":
+        etype = e.get("type")
+        if etype == "file_fix":
             out.append(f"[file fix] {e.get('file', '?')}: {e.get('summary', e.get('error', ''))}")
+        elif etype == "cross_tier_sync_failed":
+            # Found during review: this diagnostic entry (round 2's F08
+            # fix) has neither "tier" nor "user"/"assistant" keys, so it
+            # used to fall into the else branch below and produce a
+            # meaningless blank "[?] You: | Jarvis:" line fed straight
+            # into the reflection prompt. It's visibility for a human
+            # reading the raw log, not conversational content worth
+            # reflecting on — skip it here.
+            continue
         else:
             tier = e.get("tier", "?")
             out.append(f"[{tier}] You: {e.get('user', '')} | Jarvis: {e.get('assistant', '')}")
@@ -148,6 +173,18 @@ def _ensure_learning_log_preamble():
     LEARNING_LOG.write_text(preamble + "\n" + existing)
 
 
+_ASK_JARVIS_FAILURE_PREFIXES = (
+    "I couldn't reach",
+    "The server didn't",
+    "Something went wrong on the server side",
+    "The server gave me an empty response.",
+)
+
+
+def _is_transport_failure(reflection: str) -> bool:
+    return not reflection or reflection.startswith(_ASK_JARVIS_FAILURE_PREFIXES)
+
+
 def reflect_on_session(since_ts: float):
     """Writes the raw transcript to conversation_log.md, asks for an
     honest reflection (with real emphasis on catching corrections), writes
@@ -159,72 +196,83 @@ def reflect_on_session(since_ts: float):
     recent — see REFLECTION_WATERMARK_FILE above — so a second call
     covering an already-reflected window (per-conversation end, then the
     shutdown safety net moments later) is a clean no-op, not a
-    duplicate."""
-    since_ts = max(since_ts, _load_reflection_watermark())
-    entries = _session_entries(since_ts)
-    if not entries:
-        return
+    duplicate. The whole body runs under REFLECTION_LOCK_FILE so two
+    detached processes can't race between reading and writing that
+    watermark (see the lock file's own comment)."""
+    lock_fd = open(REFLECTION_LOCK_FILE, "w")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        since_ts = max(since_ts, _load_reflection_watermark())
+        entries = _session_entries(since_ts)
+        if not entries:
+            return
 
-    transcript = _format_entries(entries)
-    when = time.strftime("%Y-%m-%d %H:%M:%S")
-    _append_conversation_log(when, transcript)
+        transcript = _format_entries(entries)
 
-    instruction = (
-        "This is a real transcript of one voice-assistant session that "
-        "just ended (you are Jarvis, reflecting on your own performance "
-        "for your own future reference — not talking to the user right "
-        "now). Write exactly these three sections:\n\n"
-        "### Summary\n"
-        "1-2 sentences on what this session was actually about — concrete, "
-        "not generic ('discussed X, did Y'), so a future you skimming many "
-        "of these can tell sessions apart.\n\n"
-        "### Corrections\n"
-        "THE MOST IMPORTANT PART. Look specifically for any point where "
-        "the user corrected you, told you something was wrong, expressed "
-        "frustration, or had to redirect you after a bad answer/action. "
-        "For each one, write a standalone imperative rule for your future "
-        "self, not a vague observation — format: 'Never/Always <specific "
-        "behavior> — corrected by the user when <what happened>.' Be "
-        "concrete enough that you'd recognize the same situation "
-        "happening again. If genuinely nothing was corrected this "
-        "session, write exactly 'None this session' — do not invent a "
-        "correction just to fill the section.\n\n"
-        "### Other lessons\n"
-        "Anything else worth remembering — went well, or a real mistake "
-        "the user didn't explicitly correct but you can tell was wrong "
-        "(e.g. a fabricated fact). Skip generic advice like 'be more "
-        "careful'. If there's nothing beyond what Corrections already "
-        "covered, write 'Nothing further.'\n\n"
-        f"Transcript:\n{transcript}"
-    )
-    # allow_background=False: this needs the real, complete reflection
-    # text synchronously — a "still working, sir" placeholder would get
-    # written into the learning log as if it were a genuine reflection,
-    # silently corrupting it instead of producing a real one.
-    reflection = ask_jarvis(instruction, force_reasoning=True, allow_background=False, timeout=120)
-    # Third ask_jarvis failure string ("Something went wrong on the server
-    # side: ...") was missing here — the same transport-failure class as
-    # the other two, just uncaught, so it could get written into the
-    # learning log as if it were a genuine reflection.
-    if (
-        not reflection
-        or reflection.startswith("I couldn't reach")
-        or reflection.startswith("The server didn't")
-        or reflection.startswith("Something went wrong on the server side")
-    ):
-        return  # don't write a broken/empty reflection as if it were real
+        instruction = (
+            "This is a real transcript of one voice-assistant session that "
+            "just ended (you are Jarvis, reflecting on your own performance "
+            "for your own future reference — not talking to the user right "
+            "now). Write exactly these three sections:\n\n"
+            "### Summary\n"
+            "1-2 sentences on what this session was actually about — concrete, "
+            "not generic ('discussed X, did Y'), so a future you skimming many "
+            "of these can tell sessions apart.\n\n"
+            "### Corrections\n"
+            "THE MOST IMPORTANT PART. Look specifically for any point where "
+            "the user corrected you, told you something was wrong, expressed "
+            "frustration, or had to redirect you after a bad answer/action. "
+            "For each one, write a standalone imperative rule for your future "
+            "self, not a vague observation — format: 'Never/Always <specific "
+            "behavior> — corrected by the user when <what happened>.' Be "
+            "concrete enough that you'd recognize the same situation "
+            "happening again. If genuinely nothing was corrected this "
+            "session, write exactly 'None this session' — do not invent a "
+            "correction just to fill the section.\n\n"
+            "### Other lessons\n"
+            "Anything else worth remembering — went well, or a real mistake "
+            "the user didn't explicitly correct but you can tell was wrong "
+            "(e.g. a fabricated fact). Skip generic advice like 'be more "
+            "careful'. If there's nothing beyond what Corrections already "
+            "covered, write 'Nothing further.'\n\n"
+            f"Transcript:\n{transcript}"
+        )
+        # allow_background=False: this needs the real, complete reflection
+        # text synchronously — a "still working, sir" placeholder would get
+        # written into the learning log as if it were a genuine reflection,
+        # silently corrupting it instead of producing a real one.
+        reflection = ask_jarvis(instruction, force_reasoning=True, allow_background=False, timeout=120)
+        if _is_transport_failure(reflection):
+            return  # don't write a broken/empty reflection, and don't touch either log —
+            # a retry (watermark unchanged on failure) must re-read the SAME
+            # entries cleanly, not find conversation_log.md already holding
+            # this transcript from the failed attempt.
 
-    _ensure_learning_log_preamble()
-    entry = f"\n## {when}\n\n{reflection}\n"
-    with open(LEARNING_LOG, "a") as f:
-        f.write(entry)
+        # Both log writes happen only on success, together — previously
+        # conversation_log.md was appended BEFORE the ask_jarvis call, so a
+        # failed attempt that got retried (watermark correctly unchanged)
+        # re-appended the same transcript to conversation_log.md a second
+        # time even though learning_log.md correctly only ever got it once.
+        when = time.strftime("%Y-%m-%d %H:%M:%S")
+        _append_conversation_log(when, transcript)
+        _ensure_learning_log_preamble()
+        entry = f"\n## {when}\n\n{reflection}\n"
+        with open(LEARNING_LOG, "a") as f:
+            f.write(entry)
 
-    # Bumped to "now", not to the since_ts that was passed in — activity
-    # logged during this reflection's own ~seconds-to-tens-of-seconds
-    # Claude round-trip would otherwise fall just before the watermark
-    # and get silently skipped by the next reflection.
-    _save_reflection_watermark(time.time())
-    sync_lessons_now()
+        # The max timestamp actually present in `entries` — not time.time()
+        # (wall-clock "now"). Activity logged during this reflection's own
+        # ~10-120s model call would fall between the old watermark and a
+        # "now" watermark, and get silently skipped by the next reflection
+        # even though it was never actually read by this one either. The
+        # +1e-6 matters: _session_entries uses a >= comparison, so without
+        # nudging past the exact boundary, the next call would re-read the
+        # very last entry this call just processed.
+        _save_reflection_watermark(max(e.get("timestamp", 0) for e in entries) + 1e-6)
+        sync_lessons_now()
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 _CORRECTIONS_RE = re.compile(r"### Corrections\s*\n(.*?)(?=\n### |\Z)", re.DOTALL)

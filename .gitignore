@@ -29,6 +29,7 @@ activity.log
 conversation_log.md
 learning_log.md
 .last_reflected_ts
+.reflection.lock
 
 # macOS
 .DS_Store

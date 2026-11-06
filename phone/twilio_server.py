@@ -67,8 +67,23 @@ def _validate_twilio_request() -> bool:
 
 
 def _caller_is_owner() -> bool:
+    """True for either direction the owner can legitimately be on this
+    call: INBOUND (the owner dials the Twilio number -> From is the
+    owner), or OUTBOUND (make_call.py has Twilio dial the owner's own
+    number on Jarvis's behalf -> Twilio sets From to the Twilio number
+    itself and To to the owner being called).
+
+    Found via a fresh bug-hunt pass: this only ever checked From ==
+    owner, which is correct for inbound but can never be true for an
+    outbound call Jarvis itself placed — every proactive "call me and
+    tell me X" call hit this check, failed it, and got "This line is
+    private. Goodbye." instead of ever speaking to the person it was
+    calling. The signature check in _validate_twilio_request already
+    confirms the request genuinely came from Twilio; this check is only
+    about which phone number is allowed to talk to Jarvis once it has."""
     caller = request.form.get("From", "")
-    return caller == config.JARVIS_OWNER_PHONE_NUMBER
+    callee = request.form.get("To", "")
+    return caller == config.JARVIS_OWNER_PHONE_NUMBER or callee == config.JARVIS_OWNER_PHONE_NUMBER
 
 
 @app.route("/voice", methods=["POST"])

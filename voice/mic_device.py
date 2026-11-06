@@ -19,11 +19,24 @@ _BAD_WORDS = ("teams", "virtual", "aggregate", "blackhole", "loopback", "soundfl
 
 def list_avfoundation_audio_devices():
     """Returns [(index, name), ...] for audio input devices, parsed from
-    ffmpeg's own device listing (it prints this to stderr)."""
-    result = subprocess.run(
-        ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-        capture_output=True, text=True, timeout=10,
-    )
+    ffmpeg's own device listing (it prints this to stderr). Returns []
+    on any failure — resolve_audio_device() already treats an empty list
+    as "listing itself failed" and falls back to a last-resort guess.
+
+    Found via a fresh bug-hunt pass: this had no exception handling at
+    all, and resolve_audio_device() calls it at IMPORT TIME
+    (jarvis_voice.py's AUDIO_DEVICE = resolve_audio_device()) — a hung
+    ffmpeg (AVFoundation device enumeration can stall for seconds during
+    a Bluetooth audio device's connect/disconnect) or ffmpeg simply not
+    being on PATH used to crash the whole process before it even started,
+    not just this one lookup."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
     text = result.stderr
     devices = []
     in_audio_section = False

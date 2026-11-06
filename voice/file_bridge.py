@@ -13,6 +13,7 @@ Safety: every fix backs up the original first (backups/, timestamped) —
 this never loses your original, even if the "fix" is wrong. The download
 lands in a temp file and only replaces the original on a clean success.
 """
+import hashlib
 import json
 import shutil
 import subprocess
@@ -87,6 +88,10 @@ def log_activity(entry: dict):
         f.write(json.dumps(entry) + "\n")
 
 
+def _hash_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def fix_file(local_path, session_id=None) -> str:
     """Backs up local_path, uploads it, asks Claude (real Bash/Write access,
     server-side) to find and fix bugs, downloads the result, applies it —
@@ -102,6 +107,13 @@ def fix_file(local_path, session_id=None) -> str:
 
     backup_path = BACKUPS_DIR / f"{local_path.stem}.{int(time.time())}{local_path.suffix}"
     shutil.copy2(local_path, backup_path)
+    # The backup above protects against JARVIS's OWN fix being wrong — it
+    # doesn't protect against the user keeping editing local_path during
+    # the ~180s round trip below, since the backup predates that edit too.
+    # This hash is compared again right before the replace step, so a
+    # concurrent edit is never silently overwritten with a fix based on
+    # stale, pre-edit content.
+    pre_hash = _hash_file(local_path)
 
     # Job-scoped remote directory, not a fixed filename-only path. A fixed
     # path meant a failed/timed-out run could leave the *previous* run's
@@ -151,6 +163,24 @@ def fix_file(local_path, session_id=None) -> str:
     tmp_path = local_path.with_suffix(local_path.suffix + ".jarvis-download")
     try:
         _scp_down(remote_fixed, tmp_path)
+        try:
+            changed = _hash_file(local_path) != pre_hash
+        except OSError:
+            changed = True  # local_path vanished mid-flight -- same conflict class, same safe response
+
+        if changed:
+            fix_path = local_path.with_name(f"{local_path.stem}.jarvis-fix{local_path.suffix}")
+            tmp_path.replace(fix_path)
+            log_activity({
+                "type": "file_fix", "file": str(local_path), "backup": str(backup_path),
+                "summary": summary, "conflict": True, "fix_saved_to": str(fix_path),
+            })
+            return (
+                f"Heads up, sir — you changed {local_path.name} while I was working on it, "
+                f"so I left your copy alone and saved my fix as {fix_path.name} instead. "
+                f"What I found: {summary}"
+            )
+
         tmp_path.replace(local_path)
     except subprocess.CalledProcessError as e:
         tmp_path.unlink(missing_ok=True)

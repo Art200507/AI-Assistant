@@ -8,6 +8,7 @@ Usage once activated:
     python3 make_call.py "Sir, the task queue just cleared."
 """
 import sys
+from xml.sax.saxutils import escape
 
 import config
 from twilio.rest import Client
@@ -21,7 +22,14 @@ def make_call(message: str = ""):
     # routing through /voice (skips the "how can I help" prompt for a
     # one-way notification call).
     if message:
-        safe_message = message.replace('"', "'")
+        # Found via a fresh bug-hunt pass: only '"' was escaped (replaced
+        # with a single quote) -- a real "&", "<", or ">" in the message
+        # (e.g. "CPU load is < 5% & holding steady") produced malformed
+        # TwiML that Twilio can't parse, breaking the call instead of
+        # speaking it. twilio_server.py's own resp.say() path was always
+        # safe (the installed SDK builds TwiML via ElementTree, which
+        # auto-escapes) -- only this hand-rolled string needed it.
+        safe_message = escape(message)
         twiml = f'<Response><Say voice="Polly.Brian">{safe_message}</Say></Response>'
         call = client.calls.create(
             twiml=twiml,

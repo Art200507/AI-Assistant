@@ -15,7 +15,16 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\r")
 # line — fine to read on a screen, unbearable read aloud. Strip the whole
 # trailing sources block, and any markdown link syntax that slips through
 # elsewhere, down to just its visible text (never speak a raw URL).
-_SOURCES_BLOCK_RE = re.compile(r"\n{0,2}sources?:.*$", re.IGNORECASE | re.DOTALL)
+#
+# The `{0,2}` used to make the leading newlines OPTIONAL, so this matched
+# "source:"/"sources:" ANYWHERE in the text, not just a trailing citation
+# block — real content was destroyed whenever it happened to contain that
+# substring mid-sentence: _clean("Use source: config.json. Never overwrite
+# production.") returned just "Use". A genuine trailing citations block is
+# always preceded by a real paragraph break; requiring that literal `\n\n`
+# (not optional) means "source:" embedded in running prose — with no blank
+# line before it — is correctly left alone.
+_SOURCES_BLOCK_RE = re.compile(r"\n\n[ \t]*sources?:.*$", re.IGNORECASE | re.DOTALL)
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(https?://[^\)]+\)")
 _BARE_URL_RE = re.compile(r"https?://\S+")
 _BACKTICK_RE = re.compile(r"`([^`]*)`")
@@ -170,10 +179,11 @@ def sync_and_reindex_knowledge(timeout: int = 60) -> str:
     """Uploads every local knowledge/ file to the server and rebuilds the
     index — the "update my knowledge base" command, so newly dropped
     files (matching the inbox/ drop-folder convention) actually become
-    searchable, not just sitting there unused."""
+    searchable, not just sitting there unused. Deleting the last local
+    file and syncing correctly empties the remote too — this used to
+    early-return before ever reaching the wipe step below, leaving
+    stale remote documents/index in place forever."""
     files = [f for f in KNOWLEDGE_DIR.iterdir() if f.is_file() and not f.name.startswith(".")]
-    if not files:
-        return "There's nothing in the local knowledge folder to sync, sir."
     try:
         # Wipe + recreate before uploading, not just mkdir -p — plain scp
         # only ever adds/overwrites files, so a document deleted locally
@@ -181,7 +191,8 @@ def sync_and_reindex_knowledge(timeout: int = 60) -> str:
         # way to tell it apart from a real current document. The local
         # knowledge/ set is always small, so a full wipe-and-reupload
         # each sync is cheap and guarantees the remote exactly mirrors
-        # what's actually here right now.
+        # what's actually here right now — including "nothing," when
+        # that's genuinely the current local state.
         subprocess.run(
             [
                 "ssh", "-i", SSH_KEY, *_SSH_MULTIPLEX_OPTS,
@@ -189,14 +200,15 @@ def sync_and_reindex_knowledge(timeout: int = 60) -> str:
             ],
             check=True, capture_output=True, timeout=15,
         )
-        subprocess.run(
-            [
-                "scp", "-i", SSH_KEY, *_SSH_MULTIPLEX_OPTS,
-                *[str(f) for f in files],
-                f"{SSH_USER}@{SSH_HOST}:{REMOTE_KNOWLEDGE_DIR}/",
-            ],
-            check=True, capture_output=True, timeout=timeout,
-        )
+        if files:
+            subprocess.run(
+                [
+                    "scp", "-i", SSH_KEY, *_SSH_MULTIPLEX_OPTS,
+                    *[str(f) for f in files],
+                    f"{SSH_USER}@{SSH_HOST}:{REMOTE_KNOWLEDGE_DIR}/",
+                ],
+                check=True, capture_output=True, timeout=timeout,
+            )
         result = subprocess.run(
             [
                 "ssh", "-i", SSH_KEY, *_SSH_MULTIPLEX_OPTS,
@@ -205,6 +217,8 @@ def sync_and_reindex_knowledge(timeout: int = 60) -> str:
             capture_output=True, text=True, timeout=timeout,
         )
         count = result.stdout.strip()
+        if not files:
+            return f"Knowledge base cleared, sir — the local folder was empty, so the remote now is too ({count} chunks indexed)."
         return f"Knowledge base updated, sir — {len(files)} file(s) synced, {count} chunks indexed."
     except subprocess.CalledProcessError as e:
         return f"I couldn't sync the knowledge base: {e}"

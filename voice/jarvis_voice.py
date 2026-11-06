@@ -224,13 +224,60 @@ def _transcribe_groq(wav_path: str):
         return None
 
 
-def _transcribe_local(wav_path: str) -> str:
-    result = subprocess.run(
-        [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav_path, "-nt", "-np", "--prompt", WHISPER_PROMPT],
-        capture_output=True,
-        text=True,
-        timeout=60,
+# Same per-chunk RMS formula and default as always_on.py's own SILENCE_RMS
+# (JARVIS_SILENCE_RMS env var) — separate constant here since importing
+# always_on.py from this file would be circular (always_on.py imports
+# THIS module). Found via a fresh bug-hunt pass + direct reproduction:
+# whisper-cli, given --prompt text as a strong "initial prompt" (needed
+# so it reliably recognizes "Jarvis" at all), can hallucinate a complete,
+# plausible-sounding phrase lifted straight from that prompt when fed
+# near-pure silence — confirmed live, a 1-second all-zero WAV reliably
+# returned a fragment of WHISPER_PROMPT itself, every time. Because the
+# text is non-empty, the caller never reaches its "(heard nothing)" path
+# — it gets sent to ask_jarvis() as if genuinely spoken. Checking input
+# loudness BEFORE trusting whisper-cli's output at all closes this
+# regardless of how whisper-cli's own no-speech detection behaves.
+LOCAL_STT_SILENCE_RMS = float(os.environ.get("JARVIS_SILENCE_RMS", "400"))
+
+
+def _is_near_silence(wav_path: str) -> bool:
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            raw = wf.readframes(wf.getnframes())
+    except (wave.Error, EOFError, OSError):
+        return False  # can't tell -- don't block transcription over a read error here
+    if not raw:
+        return True
+    samples = struct.unpack(f"<{len(raw) // 2}h", raw)
+    if not samples:
+        return True
+    peak_rms = max(
+        (sum(s * s for s in samples[i:i + 1600]) / len(samples[i:i + 1600])) ** 0.5
+        for i in range(0, len(samples), 1600)
+        if samples[i:i + 1600]
     )
+    return peak_rms < LOCAL_STT_SILENCE_RMS
+
+
+def _transcribe_local(wav_path: str) -> str:
+    if _is_near_silence(wav_path):
+        return ""
+    try:
+        result = subprocess.run(
+            [WHISPER_BIN, "-m", WHISPER_MODEL, "-f", wav_path, "-nt", "-np", "--prompt", WHISPER_PROMPT],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # Found during the same bug-hunt pass: this was the one STT path
+        # with no guard at all — the documented safety net ("voice should
+        # never fully break just because one network call did") could
+        # itself crash the entire always-on process on a hung or missing
+        # whisper-cli binary.
+        return ""
+    if result.returncode != 0:
+        return ""
     lines = [
         l.strip()
         for l in result.stdout.splitlines()
@@ -382,7 +429,16 @@ def _play_wav_with_avatar_sync(wav_path: str, interrupt_event=None):
             break
         write_state("speaking", amp)
         time.sleep(CHUNK_MS / 1000)
-    player.wait(timeout=30)
+    try:
+        player.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        # Found during a fresh bug-hunt pass: unlike subprocess.run,
+        # Popen.wait()'s timeout doesn't kill the child — a stuck afplay
+        # (e.g. CoreAudio stalling on an output-route change, Bluetooth
+        # headphones disconnecting mid-playback) used to both leak an
+        # orphaned process AND crash the entire always-on process via
+        # this uncaught exception, over a single playback getting stuck.
+        player.kill()
 
 
 def speak(text: str, interrupt_event=None):

@@ -56,6 +56,21 @@ export function createAvatar(container) {
     container.style.cursor = "grabbing";
   };
   const onPointerMove = (e) => {
+    // Found during a fresh bug hunt: this only ever called engine.drag()
+    // while actively dragging — engine.cursor() was never called at all,
+    // despite the comment above claiming real pointer events drive both.
+    // hologram.js's shader compares uPointer against clip-space screen
+    // coordinates (range -1..1, see its uPointer usage), and the camera
+    // parallax (mouse.x*.2/mouse.y*.12) expects the same small range —
+    // not raw pixel coordinates. Converting to normalized device
+    // coordinates here (standard Three.js mouse-to-NDC, Y flipped since
+    // screen Y goes down and NDC Y goes up) is what actually activates
+    // the particle-repulsion-from-cursor and camera-parallax effects
+    // that were visually dead 100% of the time before this.
+    const rect = container.getBoundingClientRect();
+    const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+    engine.cursor(ndcX, ndcY);
     if (!dragging) return;
     engine.drag(e.clientX - lastX, e.clientY - lastY);
     lastX = e.clientX;

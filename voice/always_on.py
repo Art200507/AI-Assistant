@@ -343,8 +343,18 @@ def _recent_activity_text(n: int = LOG_SUMMARY_LINES) -> str:
         except Exception:
             continue
         when = e.get("when", "")
-        if e.get("type") == "file_fix":
+        etype = e.get("type")
+        if etype == "file_fix":
             out.append(f"[{when}] fixed file {e.get('file', '?')}: {e.get('summary', e.get('error', ''))}")
+        elif etype == "cross_tier_sync_failed":
+            # Found during review: this entry (round 2's F08 fix) has
+            # neither "user" nor "assistant" keys, so it used to fall
+            # into the else branch and read back as a blank, confusing
+            # "You: | Jarvis:" line — defeating the whole point of
+            # logging it, since "read me the logs" is specifically the
+            # recovery path this visibility fix was meant to support.
+            direction = e.get("direction", "?")
+            out.append(f"[{when}] background memory sync failed ({direction})")
         else:
             out.append(f"[{when}] You: {e.get('user', '')} | Jarvis: {e.get('assistant', '')}")
     return "\n".join(out)
@@ -1123,6 +1133,18 @@ def _open_dashboard():
         print(f"(couldn't open dashboard: {e})")
 
 
+def _record_local_turn_logged(session_id, user_input, answer):
+    """record_local_turn always returns bool, never raises — but its only
+    call sites fire it via threading.Thread(...).start(), which silently
+    discards that return value. A failed sync (server down, bad session)
+    was completely invisible: no retry, no log line, nothing to find even
+    by asking "read me the logs." Just visibility — a background sync
+    failure isn't worth a retry/outbox for a single-user tool, but it
+    shouldn't vanish without a trace either."""
+    if not record_local_turn(session_id, user_input, answer):
+        log_activity({"type": "cross_tier_sync_failed", "session_id": session_id, "direction": "local_to_shared"})
+
+
 def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
     label = {
         "clap": "\U0001f44f Clap",
@@ -1317,7 +1339,7 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
             answer = ask_knowledge_base(text)
             log_activity({"type": "knowledge", "action": "query", "user": text, "result": answer})
             threading.Thread(
-                target=record_local_turn,
+                target=_record_local_turn_logged,
                 args=(conversation_id, text, answer),
                 daemon=True,
             ).start()
@@ -1340,7 +1362,17 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
         if _FILE_FIX_RE.search(text):
             print("(local intent: checking inbox for a file to fix)")
             write_state("thinking", 0.4)
-            answer = fix_file(latest_inbox_file(), session_id=conversation_id)
+            # Found during this round's review loop, not the original plan:
+            # fix_file now hashes local_path (round 2's conflict-detection
+            # fix) in addition to its existing shutil/stat calls — one more
+            # real raise point added to a call site that, like
+            # ask_local_claude before round 1's fix, had no exception
+            # handling at all. Same pattern, same reason: a filesystem
+            # error here shouldn't take down the whole voice process.
+            try:
+                answer = fix_file(latest_inbox_file(), session_id=conversation_id)
+            except Exception as e:
+                answer = f"Something went wrong checking the inbox, sir: {e}"
         elif mode == "local":
             print("(routing to local Claude — real Bash/file access on this Mac)")
             routing_state.write_state("local", "Local Claude (this Mac)", text)
@@ -1354,6 +1386,14 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
                 cross_tier_context = fetch_cross_tier_context(conversation_id)
                 if cross_tier_context:
                     local_text = cross_tier_context + text
+                else:
+                    # Can't distinguish "legitimately nothing said yet this
+                    # conversation" from "the fetch itself failed" from an
+                    # empty string alone — both look identical to the local
+                    # tier. Right after a fresh switch is exactly the one
+                    # moment this fetch is expected to matter, so log it
+                    # rather than let a real failure disappear silently.
+                    log_activity({"type": "cross_tier_sync_failed", "session_id": conversation_id, "direction": "shared_to_local"})
             # ask_jarvis (the cloud/SSH path) catches its own TimeoutExpired
             # and returns a clean string (jarvis_client.py) — this call
             # never did, so a hung local `claude` CLI call used to raise
@@ -1372,7 +1412,7 @@ def _handle_wake(proc, conversation_id: str, trigger: str = "clap"):
             # background, no reason to delay speaking the answer for an
             # SSH round trip that only affects future turns.
             threading.Thread(
-                target=record_local_turn,
+                target=_record_local_turn_logged,
                 args=(conversation_id, text, answer),
                 daemon=True,
             ).start()
